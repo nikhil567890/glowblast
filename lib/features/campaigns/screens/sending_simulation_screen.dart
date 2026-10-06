@@ -14,6 +14,10 @@ class SendingSimulationScreen extends StatefulWidget {
   final String messageContent;
   final List<Customer> selectedCustomers;
   final bool isRealTest;
+  final String templateName;
+  final String templateLanguage;
+  final String? templateId;
+  final List<String> templateVariables;
 
   const SendingSimulationScreen({
     super.key,
@@ -23,7 +27,12 @@ class SendingSimulationScreen extends StatefulWidget {
     required this.messageContent,
     required this.selectedCustomers,
     this.isRealTest = false,
+    required this.templateName,
+    this.templateLanguage = 'en_US',
+    this.templateId,
+    this.templateVariables = const [],
   });
+
 
   @override
   State<SendingSimulationScreen> createState() => _SendingSimulationScreenState();
@@ -97,7 +106,7 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
             _currentStep = 3;
             _totalToSend = total;
             _acceptedCount = accepted;
-            _sentCounter = sent > 0 ? sent : accepted;
+            _sentCounter = sent;
             _deliveredCount = delivered;
             _readCount = read;
             _failedCount = failed;
@@ -118,13 +127,15 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
       };
     }).toList();
 
-    // Call backend send endpoint
+    // Call backend send endpoint with selected template
     final sendResult = await widget.repository.backendClient.sendCampaign(
       campaignId: campaignId,
       campaignName: widget.campaignName,
       businessName: widget.repository.settings.businessName,
-      templateName: 'hello_world',
-      templateLanguage: 'en_US',
+      templateId: widget.templateId,
+      templateName: widget.templateName,
+      templateLanguage: widget.templateLanguage,
+      templateVariables: widget.templateVariables,
       recipients: recipientsPayload,
       optedOutPhones: widget.repository.optedOutCustomers.map((c) => c.phone).toList(),
     );
@@ -154,19 +165,22 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
 
     // Wait for dispatch execution to complete
     int checks = 0;
+    String finalStatus = 'processing';
     while (checks < 30) {
       await Future.delayed(const Duration(milliseconds: 1000));
       if (!mounted) return;
 
       final statusCheck = await widget.repository.backendClient.getCampaignStatus(campaignId);
-      if (statusCheck != null && statusCheck['campaign'] != null) {
-        final camp = statusCheck['campaign'] as Map<String, dynamic>;
-        final status = camp['status']?.toString();
+      if (statusCheck != null) {
+        final camp = (statusCheck['campaign'] ?? statusCheck) as Map<String, dynamic>;
+        final status = camp['status']?.toString() ?? 'processing';
         final accepted = (camp['accepted'] as num?)?.toInt() ?? _acceptedCount;
-        final sent = (camp['sent'] as num?)?.toInt() ?? accepted;
+        final sent = (camp['sent'] as num?)?.toInt() ?? 0;
         final delivered = (camp['delivered'] as num?)?.toInt() ?? 0;
         final read = (camp['read'] as num?)?.toInt() ?? 0;
         final failed = (camp['failed'] as num?)?.toInt() ?? 0;
+
+        finalStatus = status;
 
         setState(() {
           _currentStep = 3;
@@ -179,21 +193,83 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
           _progress = _totalToSend > 0 ? (processed / _totalToSend).clamp(0.0, 1.0) : 1.0;
         });
 
-        if (status == 'completed' || status == 'failed') {
+        // Stop polling immediately when terminal status is reached
+        if (status == 'completed' || status == 'completed_with_errors' || status == 'failed') {
           break;
         }
       }
       checks++;
     }
 
-    _completeRealWhatsAppCampaign(campaignId, eligible);
+    _completeRealWhatsAppCampaign(campaignId, eligible, finalStatus);
   }
 
-  void _completeRealWhatsAppCampaign(String campaignId, List<Customer> eligible) async {
+  void _completeRealWhatsAppCampaign(String campaignId, List<Customer> eligible, String finalStatus) async {
     if (!mounted) return;
 
     final now = DateTime.now();
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    // If all recipients failed (e.g. accepted == 0, failed > 0 or finalStatus == 'failed')
+    if (finalStatus == 'failed' || (_acceptedCount == 0 && _totalToSend > 0)) {
+      String failureReason = 'Recipient is not authorized for the current Meta WhatsApp test environment.';
+      try {
+        final details = await widget.repository.backendClient.getCampaignDetails(campaignId);
+        if (details != null && details['campaign'] != null) {
+          final msgs = details['campaign']['messages'] as List<dynamic>?;
+          if (msgs != null && msgs.isNotEmpty) {
+            final firstFailed = msgs.firstWhere(
+              (m) => m['status'] == 'failed',
+              orElse: () => null,
+            );
+            if (firstFailed != null && firstFailed['errorMessage'] != null) {
+              failureReason = firstFailed['errorMessage'].toString();
+            }
+          }
+        }
+      } catch (_) {}
+
+      final failedCampaign = Campaign(
+        id: campaignId,
+        name: widget.campaignName,
+        month: months[now.month - 1],
+        date: now,
+        channel: 'WhatsApp',
+        targetAudience: widget.targetAudience,
+        messageContent: widget.messageContent,
+        recipients: eligible.length,
+        accepted: 0,
+        messagesSent: 0,
+        delivered: 0,
+        read: 0,
+        failed: _failedCount > 0 ? _failedCount : eligible.length,
+        replied: 0,
+        status: 'Failed',
+        isRealTest: true,
+        backendCampaignId: campaignId,
+        templateName: widget.templateName,
+      );
+
+      await widget.repository.addCampaign(
+        failedCampaign,
+        recipientCustomerIds: eligible.map((c) => c.id).toList(),
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _hasError = true;
+        _errorMessage = 'Message not sent.\n\n$failureReason\n\nAction: Add recipient phone numbers in Meta App Dashboard > WhatsApp > API Setup > To.';
+      });
+      return;
+    }
+
+    // Determine normalized campaign status for local repository
+    String appCampaignStatus = 'Sent';
+    if (finalStatus == 'completed_with_errors' || _failedCount > 0) {
+      appCampaignStatus = 'Completed with Errors';
+    } else if (finalStatus == 'completed') {
+      appCampaignStatus = 'Completed';
+    }
 
     final newCampaign = Campaign(
       id: campaignId,
@@ -204,14 +280,16 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
       targetAudience: widget.targetAudience,
       messageContent: widget.messageContent,
       recipients: eligible.length,
-      messagesSent: _sentCounter > 0 ? _sentCounter : eligible.length,
+      accepted: _acceptedCount,
+      messagesSent: _sentCounter, // STRICTLY real sent counter confirmed by backend
       delivered: _deliveredCount,
       read: _readCount,
       failed: _failedCount,
       replied: 0,
-      status: 'Sent',
+      status: appCampaignStatus,
       isRealTest: true,
       backendCampaignId: campaignId,
+      templateName: widget.templateName,
     );
 
     // Save real campaign to local repository
@@ -230,6 +308,7 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
       ),
     );
   }
+
 
   // --- Demo Simulation Path (Kept for offline demo mode) ---
   void _startSimulation(List<Customer> eligible) async {
@@ -392,13 +471,13 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
 
                             Text(
                               widget.isRealTest
-                                  ? 'Sending live WhatsApp messages via Meta test number'
+                                  ? 'Campaign: "${widget.campaignName}" • Meta Template: "${widget.templateName}" (${widget.templateLanguage})'
                                   : (_currentStep < 3
                                       ? 'Preparing personalized templates for $_totalToSend recipients'
                                       : 'Sending $_sentCounter / $_totalToSend WhatsApp messages...'),
                               textAlign: TextAlign.center,
                               style: const TextStyle(
-                                fontSize: 14.5,
+                                fontSize: 13.5,
                                 fontWeight: FontWeight.w600,
                                 color: AppColors.primarySage,
                               ),
@@ -432,27 +511,66 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
 
                             const SizedBox(height: 12),
 
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  widget.isRealTest ? 'Meta Accepted: $_acceptedCount' : 'Dispatched',
-                                  style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted),
-                                ),
-                                Text(
-                                  '${(_progress * 100).toInt()}%',
-                                  style: const TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.primarySage,
+                            if (widget.isRealTest) ...[
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    'Meta Accepted: $_acceptedCount',
+                                    style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted),
+                                  ),
+                                  Text(
+                                    '${(_progress * 100).toInt()}%',
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: AppColors.primarySage,
+                                    ),
+                                  ),
+                                  Text(
+                                    'Sent: $_sentCounter · Failed: $_failedCount',
+                                    style: TextStyle(
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: _failedCount > 0 ? AppColors.error : AppColors.whatsApp,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (_deliveredCount > 0) ...[
+                                const SizedBox(height: 6),
+                                Align(
+                                  alignment: Alignment.centerRight,
+                                  child: Text(
+                                    'Delivered: $_deliveredCount · Read: $_readCount',
+                                    style: const TextStyle(fontSize: 11.5, color: AppColors.textMuted, fontWeight: FontWeight.w600),
                                   ),
                                 ),
-                                Text(
-                                  '$_sentCounter / $_totalToSend Sent',
-                                  style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
-                                ),
                               ],
-                            ),
+                            ] else ...[
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  const Text(
+                                    'Dispatched',
+                                    style: TextStyle(fontSize: 12.5, color: AppColors.textMuted),
+                                  ),
+                                  Text(
+                                    '${(_progress * 100).toInt()}%',
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: AppColors.primarySage,
+                                    ),
+                                  ),
+                                  Text(
+                                    '$_sentCounter / $_totalToSend Sent',
+                                    style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+                                  ),
+                                ],
+                              ),
+                            ],
+
 
                             const SizedBox(height: 36),
 

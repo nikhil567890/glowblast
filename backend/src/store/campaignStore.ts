@@ -57,6 +57,7 @@ class CampaignStore {
 
     // Recalculate summary metrics from actual messages
     const msgs = camp.messages;
+    const queued = msgs.filter((m) => ['queued', 'sending'].includes(m.status)).length;
     const accepted = msgs.filter((m) =>
       ['accepted', 'sent', 'delivered', 'read'].includes(m.status)
     ).length;
@@ -70,7 +71,10 @@ class CampaignStore {
       campaignId: camp.campaignId,
       campaignName: camp.campaignName,
       status: camp.status,
+      templateName: camp.templateName,
+      templateLanguage: camp.templateLanguage,
       total: camp.total,
+      queued,
       accepted,
       sent,
       delivered,
@@ -80,6 +84,58 @@ class CampaignStore {
       createdAt: camp.createdAt,
       updatedAt: camp.updatedAt,
     };
+  }
+
+  /**
+   * Computes the strict, authoritative campaign status based on message states.
+   * - If any messages are still queued or sending: 'processing'
+   * - If all messages failed (0 accepted/sent/delivered): 'failed'
+   * - If some succeeded and some failed: 'completed_with_errors'
+   * - If all messages succeeded: 'completed'
+   */
+  public calculateCampaignStatus(campaignId: string): CampaignStatus {
+    const camp = this.get(campaignId);
+    if (!camp) return 'failed';
+
+    const msgs = camp.messages;
+    const total = msgs.length;
+    if (total === 0) return 'completed';
+
+    const inFlight = msgs.filter((m) => ['queued', 'sending'].includes(m.status)).length;
+    if (inFlight > 0) {
+      return 'processing';
+    }
+
+    const failed = msgs.filter((m) => m.status === 'failed').length;
+    const successful = msgs.filter((m) =>
+      ['accepted', 'sent', 'delivered', 'read'].includes(m.status)
+    ).length;
+
+    if (successful === 0 && failed > 0) {
+      return 'failed';
+    } else if (failed > 0 && successful > 0) {
+      return 'completed_with_errors';
+    } else if (successful > 0 && failed === 0) {
+      return 'completed';
+    } else if (total === msgs.filter((m) => m.status === 'excluded_opt_out').length) {
+      return 'completed_with_errors';
+    }
+
+    return 'completed';
+  }
+
+  /**
+   * Recalculates the campaign's status and persists it to disk.
+   */
+  public recalculateAndSaveCampaignStatus(campaignId: string): CampaignSummary | undefined {
+    const camp = this.campaigns.get(campaignId);
+    if (!camp) return undefined;
+
+    const newStatus = this.calculateCampaignStatus(campaignId);
+    camp.status = newStatus;
+    camp.updatedAt = new Date().toISOString();
+    this.saveToDisk();
+    return this.getSummary(campaignId);
   }
 
   public create(campaign: StoredCampaign): StoredCampaign {
@@ -97,6 +153,12 @@ class CampaignStore {
     this.saveToDisk();
     return camp;
   }
+
+  public clear(): void {
+    this.campaigns.clear();
+    this.saveToDisk();
+  }
 }
 
 export const campaignStore = new CampaignStore();
+

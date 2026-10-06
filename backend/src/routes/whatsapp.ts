@@ -3,6 +3,7 @@ import { getSafeConfigStatus, getAuthorizedTestRecipients } from '../config/env'
 import { singleMessageSchema } from '../utils/validation';
 import { normalizeWhatsAppPhone } from '../utils/phone';
 import { WhatsAppService } from '../services/whatsappService';
+import { templateStore } from '../store/templateStore';
 
 const router = Router();
 
@@ -32,7 +33,7 @@ router.post('/send', async (req: Request, res: Response) => {
     return;
   }
 
-  const { phone, name, templateName, templateLanguage } = parsed.data;
+  const { phone, name, templateId, templateName, templateLanguage, templateComponents, templateVariables } = parsed.data;
 
   const normalizedPhone = normalizeWhatsAppPhone(phone);
   if (!normalizedPhone) {
@@ -41,6 +42,55 @@ router.post('/send', async (req: Request, res: Response) => {
       error: {
         code: 'INVALID_PHONE',
         message: 'Phone number could not be normalized for WhatsApp.',
+      },
+    });
+    return;
+  }
+
+  // Check template mapping and approval
+  const template = templateStore.findByIdOrName(templateId || templateName);
+  let effectiveMetaTemplateName = templateName;
+  let effectiveLanguage = templateLanguage || 'en_US';
+  let effectiveComponents = templateComponents;
+
+  if (template) {
+    if (template.status !== 'approved') {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: 'TEMPLATE_NOT_APPROVED',
+          message: `This GlowBlast template is not connected to an approved WhatsApp template yet (status: ${template.status}).`,
+        },
+      });
+      return;
+    }
+    effectiveMetaTemplateName = template.name;
+    effectiveLanguage = template.language || effectiveLanguage;
+
+    if (!effectiveComponents && template.variables && template.variables.length > 0) {
+      const vars = templateVariables && templateVariables.length > 0 ? templateVariables : template.variables;
+      const paramsList = vars.map((v) => {
+        const vLower = v.toLowerCase();
+        let textVal = '';
+        if (vLower === 'name' || vLower === 'customer_name' || vLower === 'client') {
+          textVal = name || 'Client';
+        } else if (vLower === 'business_name' || vLower === 'spa_name') {
+          textVal = 'Our Spa & Wellness';
+        } else if (template.exampleValues?.[v]) {
+          textVal = template.exampleValues[v];
+        } else {
+          textVal = v;
+        }
+        return { type: 'text', text: textVal };
+      });
+      effectiveComponents = [{ type: 'body', parameters: paramsList }];
+    }
+  } else if (templateName !== 'hello_world') {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: 'UNMAPPED_TEMPLATE',
+        message: 'This GlowBlast template is not connected to an approved WhatsApp template yet.',
       },
     });
     return;
@@ -62,8 +112,9 @@ router.post('/send', async (req: Request, res: Response) => {
   const result = await WhatsAppService.sendTemplateMessage({
     recipientPhone: normalizedPhone,
     recipientName: name,
-    templateName,
-    templateLanguage,
+    templateName: effectiveMetaTemplateName,
+    templateLanguage: effectiveLanguage,
+    templateComponents: effectiveMetaTemplateName === 'hello_world' ? undefined : effectiveComponents,
   });
 
   if (!result.success) {
@@ -73,10 +124,14 @@ router.post('/send', async (req: Request, res: Response) => {
         code: result.errorCode?.toString() || 'SEND_FAILED',
         title: result.errorTitle,
         message: result.errorMessage,
+        details: result.errorDetails,
+        requestedTemplateName: result.requestedTemplateName || effectiveMetaTemplateName,
+        requestedTemplateLanguage: result.requestedTemplateLanguage || effectiveLanguage,
       },
     });
     return;
   }
+
 
   res.json({
     success: true,

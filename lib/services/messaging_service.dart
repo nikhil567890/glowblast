@@ -22,6 +22,9 @@ abstract class MessagingService {
     required String recipientPhone,
     required String recipientName,
     required String content,
+    String? templateName,
+    String? templateLanguage,
+    List<String>? templateVariables,
   });
 }
 
@@ -32,6 +35,9 @@ class DemoMessagingService implements MessagingService {
     required String recipientPhone,
     required String recipientName,
     required String content,
+    String? templateName,
+    String? templateLanguage,
+    List<String>? templateVariables,
   }) async {
     // Artificial slight delay to simulate local packet
     await Future.delayed(const Duration(milliseconds: 10));
@@ -45,7 +51,7 @@ class DemoMessagingService implements MessagingService {
 }
 
 /// Real WhatsApp Messaging Service that connects through the secure GlowBlast backend.
-/// NEVER calls Meta directly.
+/// NEVER calls Meta directly and NEVER hardcodes hello_world.
 class RealWhatsAppMessagingService implements MessagingService {
   final GlowBlastBackendClient backendClient;
 
@@ -56,12 +62,25 @@ class RealWhatsAppMessagingService implements MessagingService {
     required String recipientPhone,
     required String recipientName,
     required String content,
+    String? templateName,
+    String? templateLanguage,
+    List<String>? templateVariables,
   }) async {
+    if (templateName == null || templateName.trim().isEmpty) {
+      return SendResult(
+        isSuccess: false,
+        messageId: '',
+        status: 'failed',
+        error: 'A valid approved WhatsApp template must be selected.',
+      );
+    }
+
     final res = await backendClient.sendSingleMessage(
       phone: recipientPhone,
       name: recipientName,
-      templateName: 'hello_world',
-      templateLanguage: 'en_US',
+      templateName: templateName.trim(),
+      templateLanguage: templateLanguage ?? 'en_US',
+      templateVariables: templateVariables,
     );
 
     if (res['success'] == true) {

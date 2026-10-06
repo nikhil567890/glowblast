@@ -1,6 +1,7 @@
 import '../models/customer.dart';
 import '../models/campaign.dart';
 import '../models/group.dart';
+import '../models/whatsapp_template.dart';
 
 class InitialData {
   static List<Customer> generate200Customers() {
@@ -244,4 +245,91 @@ class InitialData {
       'body': '🥂 Step into the season refreshed and glowing! Kickstart your wellness resolutions with our Detox Scrub & Massage combo at {spa_name}. Special 25% OFF all week!',
     },
   ];
+
+  static List<WhatsAppTemplate> getInitialTemplates() {
+    final now = DateTime.now();
+    return [
+      WhatsAppTemplate(
+        id: 'tpl_hello_world',
+        name: 'hello_world',
+        displayName: 'Meta Test Default (Hello World)',
+        description: 'Official Meta WhatsApp Cloud API default test template (no parameters). Pre-approved on all Meta test numbers.',
+        category: 'UTILITY',
+        language: 'en_US',
+        status: 'approved',
+        metaStatus: 'APPROVED',
+        body: 'Hello World',
+        variables: [],
+        createdAt: now.subtract(const Duration(days: 60)),
+      ),
+      WhatsAppTemplate(
+        id: 'tpl_birthday',
+        name: 'birthday_offer',
+        displayName: 'Birthday Pampering',
+        description: 'Celebratory birthday greeting with personalized 25% discount. (Draft - requires Meta submission/approval)',
+        category: 'MARKETING',
+        language: 'en_US',
+        status: 'draft',
+        metaStatus: 'NOT_SUBMITTED',
+        body: '🎂 Happy Birthday month, {name}! Celebrate your special day with our rejuvenating therapy at {business_name}. Enjoy 25% OFF on any 90-minute treatment this month. Reply BOOK to reserve!',
+        variables: ['name', 'business_name'],
+        exampleValues: {'name': 'Ananya', 'business_name': 'Our Spa & Wellness'},
+        createdAt: now.subtract(const Duration(days: 45)),
+      ),
+      WhatsAppTemplate(
+        id: 'tpl_diwali',
+        name: 'diwali_offer',
+        displayName: 'Diwali Festive Radiance',
+        description: 'Festive radiance offer with flat 35% discount. (Draft - requires Meta submission/approval)',
+        category: 'MARKETING',
+        language: 'en_US',
+        status: 'draft',
+        metaStatus: 'NOT_SUBMITTED',
+        body: '✨ Sparkle & Glow this Diwali! Indulge in our Festive Radiance Ritual at {business_name} with flat 35% OFF until Diwali eve. Treat yourself or gift a loved one! Reply YES to book.',
+        variables: ['business_name'],
+        exampleValues: {'business_name': 'Our Spa & Wellness'},
+        createdAt: now.subtract(const Duration(days: 30)),
+      ),
+      WhatsAppTemplate(
+        id: 'tpl_reminder',
+        name: 'appointment_reminder',
+        displayName: 'Appointment Reminder',
+        description: 'Pre-visit confirmation and timing reminder. (Draft - requires Meta submission/approval)',
+        category: 'UTILITY',
+        language: 'en_US',
+        status: 'draft',
+        metaStatus: 'NOT_SUBMITTED',
+        body: '🌸 Hi {name}, this is a gentle reminder for your upcoming appointment at {business_name}. Please arrive 10 minutes early to enjoy our warm herbal welcome tea.',
+        variables: ['name', 'business_name'],
+        exampleValues: {'name': 'Ananya', 'business_name': 'Our Spa & Wellness'},
+        createdAt: now.subtract(const Duration(days: 20)),
+      ),
+      WhatsAppTemplate(
+        id: 'tpl_vip_draft',
+        name: 'vip_exclusive_access',
+        displayName: 'VIP Exclusive Access (Draft)',
+        description: 'Local draft template awaiting finalization. Cannot be dispatched until submitted and approved by Meta.',
+        category: 'MARKETING',
+        language: 'en_US',
+        status: 'draft',
+        metaStatus: 'NOT_SUBMITTED',
+        body: '✨ Exclusive VIP invitation for {name} from {business_name}. Enjoy priority booking!',
+        variables: ['name', 'business_name'],
+        createdAt: now.subtract(const Duration(days: 5)),
+      ),
+      WhatsAppTemplate(
+        id: 'tpl_festival_pending',
+        name: 'festival_super_sale',
+        displayName: 'Festival Super Sale (Pending Review)',
+        description: 'Submitted to Meta WhatsApp Business Platform and currently under review. Cannot be dispatched until approved.',
+        category: 'MARKETING',
+        language: 'en_US',
+        status: 'pending_approval',
+        metaStatus: 'PENDING',
+        body: '🎉 Grand Festive Sale at {business_name}! Enjoy 40% OFF all therapies this weekend, {name}!',
+        variables: ['business_name', 'name'],
+        createdAt: now.subtract(const Duration(days: 2)),
+      ),
+    ];
+  }
 }

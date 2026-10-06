@@ -5,6 +5,8 @@ import '../models/customer.dart';
 import '../models/campaign.dart';
 import '../models/group.dart';
 import '../models/settings_model.dart';
+import '../models/whatsapp_template.dart';
+import '../models/auth_user.dart';
 import '../demo_data/initial_data.dart';
 import '../../services/excel_service.dart';
 import '../../services/glowblast_backend_client.dart';
@@ -13,24 +15,62 @@ class AppRepository extends ChangeNotifier {
   static const String _keyCustomers = 'glowblast_customers_v3';
   static const String _keyCampaigns = 'glowblast_campaigns_v3';
   static const String _keyGroups = 'glowblast_groups_v3';
+  static const String _keyTemplates = 'glowblast_templates_v3';
   static const String _keySettings = 'glowblast_settings_v3';
   static const String _keyInitializedV3 = 'glowblast_is_initialized_v3';
+  static const String _keyAuthToken = 'glowblast_auth_token_v1';
+  static const String _keyAuthUser = 'glowblast_auth_user_v1';
 
   List<Customer> _customers = [];
   List<Campaign> _campaigns = [];
   List<CustomerGroup> _groups = [];
+  List<WhatsAppTemplate> _templates = [];
   AppSettings _settings = AppSettings();
+  String? _authToken;
+  AuthUser? _currentUser;
   bool _isLoading = true;
   late GlowBlastBackendClient backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
+
+  // Auth getters
+  bool get isAuthenticated => _authToken != null && _currentUser != null;
+  bool get hasProfile => _settings.hasProfile;
+  AuthUser? get currentUser => _currentUser;
+  String? get authToken => _authToken;
 
   // Getters
   List<Customer> get customers => List.unmodifiable(_customers);
   List<Campaign> get campaigns => List.unmodifiable(_campaigns);
-  List<Campaign> get sentCampaigns => _campaigns.where((c) => c.status == 'Sent' || c.status == 'Accepted').toList();
+  List<Campaign> get sentCampaigns => _campaigns.where((c) {
+    final s = c.status.toLowerCase();
+    return s == 'sent' || s == 'accepted' || s == 'completed' || s == 'completed with errors';
+  }).toList();
   List<Campaign> get scheduledCampaigns => _campaigns.where((c) => c.status == 'Scheduled').toList();
+
+
   List<Campaign> get realTestCampaigns => _campaigns.where((c) => c.isRealTest).toList();
   List<Campaign> get demoCampaigns => _campaigns.where((c) => !c.isRealTest).toList();
   List<CustomerGroup> get groups => List.unmodifiable(_groups);
+  List<WhatsAppTemplate> get templates => List.unmodifiable(_templates);
+  List<WhatsAppTemplate> get approvedTemplates => _templates.where((t) => t.isApproved).toList();
+  List<WhatsAppTemplate> get pendingTemplates => _templates.where((t) => t.isPending).toList();
+  List<WhatsAppTemplate> get draftTemplates => _templates.where((t) => t.isDraft).toList();
+
+  WhatsAppTemplate? getTemplateById(String id) {
+    try {
+      return _templates.firstWhere((t) => t.id == id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  WhatsAppTemplate? getTemplateByName(String name) {
+    try {
+      return _templates.firstWhere((t) => t.name.toLowerCase() == name.toLowerCase());
+    } catch (_) {
+      return null;
+    }
+  }
+
   AppSettings get settings => _settings;
   bool get isLoading => _isLoading;
 
@@ -129,7 +169,9 @@ class AppRepository extends ChangeNotifier {
       ...InitialData.getScheduledCampaigns(),
     ];
     _groups = InitialData.getInitialGroups(_customers);
+    _templates = InitialData.getInitialTemplates();
     _settings = AppSettings();
+    backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
 
     await _saveAll(prefs);
     await prefs.setBool(_keyInitializedV3, true);
@@ -166,13 +208,66 @@ class AppRepository extends ChangeNotifier {
       _groups = InitialData.getInitialGroups(_customers);
     }
 
-    // Settings
+    // Templates
+    final tplRaw = prefs.getString(_keyTemplates);
+    if (tplRaw != null) {
+      try {
+        final List<dynamic> list = jsonDecode(tplRaw);
+        _templates = list.map((e) => WhatsAppTemplate.fromJson(e as Map<String, dynamic>)).toList();
+      } catch (_) {
+        _templates = InitialData.getInitialTemplates();
+      }
+    } else {
+      _templates = InitialData.getInitialTemplates();
+    }
+
+    // Settings & Automatic Stale URL Migration
     final setRaw = prefs.getString(_keySettings);
     if (setRaw != null) {
-      _settings = AppSettings.fromJson(jsonDecode(setRaw) as Map<String, dynamic>);
+      final map = jsonDecode(setRaw) as Map<String, dynamic>;
+      _settings = AppSettings.fromJson(map);
+      // If migration replaced an old 10.0.2.2 or localhost URL, persist immediately
+      if (map['backendUrl'] != _settings.backendUrl) {
+        debugPrint('[AppRepository] Migrated backendUrl from "${map['backendUrl']}" to "${_settings.backendUrl}"');
+        await prefs.setString(_keySettings, jsonEncode(_settings.toJson()));
+      }
     } else {
       _settings = AppSettings();
     }
+
+    // Always re-sync backendClient with active settings
+    backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
+
+    // Load persisted auth session
+    _authToken = prefs.getString(_keyAuthToken);
+    final userRaw = prefs.getString(_keyAuthUser);
+    if (userRaw != null) {
+      try {
+        _currentUser = AuthUser.fromJson(jsonDecode(userRaw) as Map<String, dynamic>);
+      } catch (_) {
+        _currentUser = null;
+      }
+    }
+  }
+
+  /// Securely saves authenticated session and user profile.
+  Future<void> saveAuthSession(String token, AuthUser user) async {
+    _authToken = token;
+    _currentUser = user;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyAuthToken, token);
+    await prefs.setString(_keyAuthUser, jsonEncode(user.toJson()));
+  }
+
+  /// Clears active authenticated session on logout without wiping business data.
+  Future<void> clearAuthSession() async {
+    _authToken = null;
+    _currentUser = null;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_keyAuthToken);
+    await prefs.remove(_keyAuthUser);
   }
 
   void _fallbackToMemory() {
@@ -182,7 +277,9 @@ class AppRepository extends ChangeNotifier {
       ...InitialData.getScheduledCampaigns(),
     ];
     _groups = InitialData.getInitialGroups(_customers);
+    _templates = InitialData.getInitialTemplates();
     _settings = AppSettings();
+    backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
   }
 
   Future<void> _saveAll([SharedPreferences? prefs]) async {
@@ -190,6 +287,7 @@ class AppRepository extends ChangeNotifier {
     await p.setString(_keyCustomers, jsonEncode(_customers.map((c) => c.toJson()).toList()));
     await p.setString(_keyCampaigns, jsonEncode(_campaigns.map((c) => c.toJson()).toList()));
     await p.setString(_keyGroups, jsonEncode(_groups.map((g) => g.toJson()).toList()));
+    await p.setString(_keyTemplates, jsonEncode(_templates.map((t) => t.toJson()).toList()));
     await p.setString(_keySettings, jsonEncode(_settings.toJson()));
   }
 
@@ -322,10 +420,11 @@ class AppRepository extends ChangeNotifier {
     if (idx != -1) {
       final old = _campaigns[idx];
       _campaigns[idx] = old.copyWith(
+        accepted: accepted ?? old.accepted,
         delivered: delivered ?? old.delivered,
         read: read ?? old.read,
         failed: failed ?? old.failed,
-        messagesSent: (sent ?? accepted) ?? old.messagesSent,
+        messagesSent: sent ?? old.messagesSent,
         status: status ?? old.status,
       );
       notifyListeners();
@@ -357,6 +456,7 @@ class AppRepository extends ChangeNotifier {
     await prefs.remove(_keyCustomers);
     await prefs.remove(_keyCampaigns);
     await prefs.remove(_keyGroups);
+    await prefs.remove(_keyTemplates);
     await prefs.remove(_keySettings);
     await prefs.remove(_keyInitializedV3);
 
@@ -366,6 +466,7 @@ class AppRepository extends ChangeNotifier {
       ...InitialData.getScheduledCampaigns(),
     ];
     _groups = InitialData.getInitialGroups(_customers);
+    _templates = InitialData.getInitialTemplates();
 
     if (clearProfile) {
       _settings = AppSettings();
@@ -376,5 +477,61 @@ class AppRepository extends ChangeNotifier {
     await _saveAll(prefs);
     await prefs.setBool(_keyInitializedV3, true);
     notifyListeners();
+  }
+
+  // --- WhatsApp Template Operations ---
+  Future<void> addTemplate(WhatsAppTemplate template) async {
+    _templates.removeWhere((t) => t.id == template.id || t.name.toLowerCase() == template.name.toLowerCase());
+    _templates.insert(0, template);
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyTemplates, jsonEncode(_templates.map((t) => t.toJson()).toList()));
+  }
+
+  Future<void> updateTemplateStatus(String id, String status, {String? metaStatus}) async {
+    final idx = _templates.indexWhere((t) => t.id == id || t.name.toLowerCase() == id.toLowerCase());
+    if (idx != -1) {
+      _templates[idx] = _templates[idx].copyWith(
+        status: status,
+        metaStatus: metaStatus ?? (status == 'approved' ? 'APPROVED' : _templates[idx].metaStatus),
+        updatedAt: DateTime.now(),
+      );
+      notifyListeners();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_keyTemplates, jsonEncode(_templates.map((t) => t.toJson()).toList()));
+    }
+  }
+
+  Future<void> deleteTemplate(String id) async {
+    _templates.removeWhere((t) => t.id == id || t.name.toLowerCase() == id.toLowerCase());
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyTemplates, jsonEncode(_templates.map((t) => t.toJson()).toList()));
+  }
+
+  Future<int> syncTemplatesWithBackend() async {
+    try {
+      final backendTemplates = await backendClient.getTemplates();
+      if (backendTemplates.isEmpty) return 0;
+
+      int updatedCount = 0;
+      for (final raw in backendTemplates) {
+        final tpl = WhatsAppTemplate.fromJson(raw);
+        final idx = _templates.indexWhere((t) => t.name.toLowerCase() == tpl.name.toLowerCase());
+        if (idx != -1) {
+          _templates[idx] = tpl;
+        } else {
+          _templates.add(tpl);
+        }
+        updatedCount++;
+      }
+
+      notifyListeners();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_keyTemplates, jsonEncode(_templates.map((t) => t.toJson()).toList()));
+      return updatedCount;
+    } catch (_) {
+      return 0;
+    }
   }
 }

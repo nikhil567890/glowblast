@@ -8,6 +8,8 @@ import healthRouter from './routes/health';
 import whatsappRouter from './routes/whatsapp';
 import campaignsRouter from './routes/campaigns';
 import webhookRouter from './routes/webhook';
+import templatesRouter from './routes/templates';
+import authRouter from './routes/auth';
 
 export const app = express();
 
@@ -56,6 +58,8 @@ app.use('/api/messages', whatsappRouter);
 app.use('/api/whatsapp', whatsappRouter);
 app.use('/api/campaigns', campaignsRouter);
 app.use('/api/webhook', webhookRouter);
+app.use('/api/templates', templatesRouter);
+app.use('/api/auth', authRouter);
 
 // Root informational endpoint
 app.get('/', (_req, res) => {
@@ -89,6 +93,8 @@ if (process.env.NODE_ENV !== 'test') {
     console.log(` Test Display Number: ${env.TEST_WHATSAPP_DISPLAY_NUMBER}`);
     console.log(` Test Recipient Limit: ${env.TEST_RECIPIENT_LIMIT}`);
     console.log(` Webhook URL: http://localhost:${env.PORT}/api/webhook/whatsapp`);
+    console.log(` Brevo Sender: ${env.BREVO_SENDER_NAME} <${env.BREVO_SENDER_EMAIL || 'not-configured'}>`);
+    console.log(` Brevo Configured: ${!!(env.BREVO_API_KEY && env.BREVO_SENDER_EMAIL)}`);
     console.log('====================================================');
   });
 

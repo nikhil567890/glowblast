@@ -39,10 +39,10 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
 
     _controller.forward();
 
-    // Navigate after splash completes
-    _timer = Timer(const Duration(milliseconds: 2200), () {
+    // Navigate after splash completes: Check authenticated session
+    _timer = Timer(const Duration(milliseconds: 2000), () {
       if (!mounted) return;
-      if (widget.repository.settings.hasProfile) {
+      if (widget.repository.isAuthenticated || widget.repository.hasProfile) {
         Navigator.of(context).pushReplacement(
           PageRouteBuilder(
             pageBuilder: (context, anim, secAnim) => MainNavigationScreen(repository: widget.repository),

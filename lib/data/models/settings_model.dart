@@ -1,3 +1,5 @@
+import '../../core/constants/api_constants.dart';
+
 class AppSettings {
   final String fullName;
   final String businessName;
@@ -16,7 +18,7 @@ class AppSettings {
     this.whatsAppCredits = 1000,
     this.themeMode = 'system',
     this.messagingMode = 'demo',
-    this.backendUrl = 'http://10.0.2.2:3000',
+    this.backendUrl = ApiConstants.defaultProductionBackendUrl,
   });
 
   bool get hasProfile =>
@@ -48,6 +50,10 @@ class AppSettings {
     // If it was the legacy default hard-coded demo profile, treat as empty so Landing page triggers
     final isLegacyDemo = (name == 'Priya') || (business == 'Serenity Spa & Wellness');
 
+    // Automatic migration of stale local development / emulator URLs to the production cloud URL
+    final rawBackendUrl = json['backendUrl'] as String?;
+    final migratedBackendUrl = ApiConstants.normalizeBackendUrl(rawBackendUrl);
+
     return AppSettings(
       fullName: isLegacyDemo ? '' : name,
       businessName: isLegacyDemo ? '' : business,
@@ -56,7 +62,7 @@ class AppSettings {
       whatsAppCredits: (json['whatsAppCredits'] as num?)?.toInt() ?? 1000,
       themeMode: json['themeMode'] as String? ?? 'system',
       messagingMode: json['messagingMode'] as String? ?? 'demo',
-      backendUrl: json['backendUrl'] as String? ?? 'http://10.0.2.2:3000',
+      backendUrl: migratedBackendUrl,
     );
   }
 
@@ -78,7 +84,9 @@ class AppSettings {
       whatsAppCredits: whatsAppCredits ?? this.whatsAppCredits,
       themeMode: themeMode ?? this.themeMode,
       messagingMode: messagingMode ?? this.messagingMode,
-      backendUrl: backendUrl ?? this.backendUrl,
+      backendUrl: backendUrl != null
+          ? ApiConstants.normalizeBackendUrl(backendUrl)
+          : this.backendUrl,
     );
   }
 }

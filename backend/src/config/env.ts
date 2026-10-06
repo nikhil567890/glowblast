@@ -17,6 +17,10 @@ const envSchema = z.object({
   TEST_RECIPIENT_LIMIT: z.string().default('5').transform((val) => parseInt(val, 10)),
   TEST_CAMPAIGN_ENABLED: z.string().default('true').transform((val) => val === 'true'),
   TEST_RECIPIENTS: z.string().default(''),
+  BREVO_API_KEY: z.string().default(''),
+  BREVO_SENDER_EMAIL: z.string().default(''),
+  BREVO_SENDER_NAME: z.string().default('GlowBlast'),
+  JWT_SECRET: z.string().default('glowblast_jwt_super_secret_dev_2026'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -40,15 +44,31 @@ export function getSafeConfigStatus() {
     testRecipientLimit: env.TEST_RECIPIENT_LIMIT,
     displayNumber: env.TEST_WHATSAPP_DISPLAY_NUMBER,
     apiVersion: env.WHATSAPP_API_VERSION,
+    brevoConfigured: !!(env.BREVO_API_KEY && env.BREVO_SENDER_EMAIL),
   };
 }
 
 /**
- * Parses comma-separated authorized test recipient numbers.
+ * Returns safe Brevo configuration status without exposing API key.
+ */
+export function getSafeBrevoStatus() {
+  return {
+    configured: !!(env.BREVO_API_KEY && env.BREVO_SENDER_EMAIL),
+    senderEmailConfigured: !!env.BREVO_SENDER_EMAIL,
+    senderName: env.BREVO_SENDER_NAME,
+  };
+}
+
+import { normalizeWhatsAppPhone } from '../utils/phone';
+
+/**
+ * Parses comma-separated authorized test recipient numbers using the central
+ * normalization function.
  */
 export function getAuthorizedTestRecipients(): string[] {
   if (!env.TEST_RECIPIENTS) return [];
   return env.TEST_RECIPIENTS.split(',')
-    .map((num) => num.replace(/\D/g, '').trim())
-    .filter((num) => num.length >= 10);
+    .map((num) => normalizeWhatsAppPhone(num.trim()))
+    .filter((num): num is string => !!num);
 }
+

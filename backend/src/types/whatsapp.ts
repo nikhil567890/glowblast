@@ -11,6 +11,7 @@ export interface MetaSendMessageResponse {
 }
 
 export interface MetaApiError {
+  httpStatus?: number;
   message: string;
   type: string;
   code: number;
@@ -21,6 +22,7 @@ export interface MetaApiError {
   };
   fbtrace_id?: string;
 }
+
 
 export interface MetaWebhookEntry {
   id: string;

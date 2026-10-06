@@ -7,15 +7,17 @@ class Campaign {
   final String targetAudience;
   final String messageContent;
   final int recipients; // Eligible customers count
-  final int messagesSent; // recipients * 1
+  final int accepted; // Confirmed accepted by Meta API
+  final int messagesSent; // Confirmed sent by WhatsApp webhook
   final int delivered;
   final int read;
   final int failed;
   final int replied;
-  final String status; // 'Sent', 'Scheduled', 'Accepted'
+  final String status; // 'Sent', 'Scheduled', 'Accepted', 'Completed', 'Completed with Errors', 'Failed'
   final DateTime? scheduledDate;
   final bool isRealTest; // True if sent through real Meta WhatsApp Cloud API backend
   final String? backendCampaignId;
+  final String? templateName;
 
   Campaign({
     required this.id,
@@ -26,6 +28,7 @@ class Campaign {
     required this.targetAudience,
     required this.messageContent,
     required this.recipients,
+    this.accepted = 0,
     required this.messagesSent,
     required this.delivered,
     required this.read,
@@ -35,9 +38,14 @@ class Campaign {
     this.scheduledDate,
     this.isRealTest = false,
     this.backendCampaignId,
+    this.templateName,
   });
 
-  double get deliveryRate => messagesSent > 0 ? (delivered / messagesSent) * 100 : 0.0;
+  double get deliveryRate {
+    final base = messagesSent > 0 ? messagesSent : (accepted > 0 ? accepted : 0);
+    return base > 0 ? (delivered / base) * 100 : 0.0;
+  }
+
   double get readRate => delivered > 0 ? (read / delivered) * 100 : 0.0;
   double get replyRate => read > 0 ? (replied / read) * 100 : 0.0;
 
@@ -50,6 +58,7 @@ class Campaign {
     'targetAudience': targetAudience,
     'messageContent': messageContent,
     'recipients': recipients,
+    'accepted': accepted,
     'messagesSent': messagesSent,
     'delivered': delivered,
     'read': read,
@@ -59,6 +68,7 @@ class Campaign {
     'scheduledDate': scheduledDate?.toIso8601String(),
     'isRealTest': isRealTest,
     'backendCampaignId': backendCampaignId,
+    'templateName': templateName,
   };
 
   factory Campaign.fromJson(Map<String, dynamic> json) {
@@ -72,7 +82,8 @@ class Campaign {
       targetAudience: json['targetAudience'] as String? ?? 'All Customers',
       messageContent: json['messageContent'] as String? ?? '',
       recipients: recipients,
-      messagesSent: (json['messagesSent'] as num?)?.toInt() ?? recipients,
+      accepted: (json['accepted'] as num?)?.toInt() ?? 0,
+      messagesSent: (json['messagesSent'] as num?)?.toInt() ?? 0,
       delivered: (json['delivered'] as num?)?.toInt() ?? 0,
       read: (json['read'] as num?)?.toInt() ?? 0,
       failed: (json['failed'] as num?)?.toInt() ?? 0,
@@ -81,6 +92,7 @@ class Campaign {
       scheduledDate: json['scheduledDate'] != null ? DateTime.tryParse(json['scheduledDate'] as String) : null,
       isRealTest: json['isRealTest'] as bool? ?? false,
       backendCampaignId: json['backendCampaignId'] as String?,
+      templateName: json['templateName'] as String?,
     );
   }
 
@@ -93,6 +105,7 @@ class Campaign {
     String? targetAudience,
     String? messageContent,
     int? recipients,
+    int? accepted,
     int? messagesSent,
     int? delivered,
     int? read,
@@ -102,6 +115,7 @@ class Campaign {
     DateTime? scheduledDate,
     bool? isRealTest,
     String? backendCampaignId,
+    String? templateName,
   }) {
     return Campaign(
       id: id ?? this.id,
@@ -112,6 +126,7 @@ class Campaign {
       targetAudience: targetAudience ?? this.targetAudience,
       messageContent: messageContent ?? this.messageContent,
       recipients: recipients ?? this.recipients,
+      accepted: accepted ?? this.accepted,
       messagesSent: messagesSent ?? this.messagesSent,
       delivered: delivered ?? this.delivered,
       read: read ?? this.read,
@@ -121,6 +136,8 @@ class Campaign {
       scheduledDate: scheduledDate ?? this.scheduledDate,
       isRealTest: isRealTest ?? this.isRealTest,
       backendCampaignId: backendCampaignId ?? this.backendCampaignId,
+      templateName: templateName ?? this.templateName,
     );
   }
 }
+

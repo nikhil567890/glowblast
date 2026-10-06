@@ -310,33 +310,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
                         const SizedBox(height: 14),
 
-                        // Meaningful Performance Cards: Total Customers and Messages Sent This Month
-                        Row(
-                          children: [
-                            Expanded(
-                              child: StatCard(
-                                title: 'Total Customers',
-                                value: '${repo.totalCustomersCount}',
-                                subtitle: '${repo.eligibleCustomersCount} eligible for offers',
-                                icon: Icons.people_alt_rounded,
-                                trend: '↑ Active',
-                                isTrendPositive: true,
-                                onTap: () => widget.onNavigateTab?.call(1),
+                        // Meaningful Performance Cards: Exactly Equal Dimensions (Width & Height)
+                        IntrinsicHeight(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Expanded(
+                                child: StatCard(
+                                  title: 'Total Customers',
+                                  value: '${repo.totalCustomersCount}',
+                                  subtitle: '${repo.eligibleCustomersCount} eligible for offers',
+                                  icon: Icons.people_alt_rounded,
+                                  trend: '↑ Active',
+                                  isTrendPositive: true,
+                                  onTap: () => widget.onNavigateTab?.call(1),
+                                ),
                               ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: StatCard(
-                                title: 'Messages Sent',
-                                value: '${repo.messagesSentThisMonth}',
-                                subtitle: 'This month across campaigns',
-                                icon: Icons.mark_chat_read_rounded,
-                                trend: '↑ Live',
-                                isTrendPositive: true,
-                                onTap: () => widget.onNavigateTab?.call(2),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: StatCard(
+                                  title: 'Messages Sent',
+                                  value: '${repo.messagesSentThisMonth}',
+                                  subtitle: 'This month across blasts',
+                                  icon: Icons.mark_chat_read_rounded,
+                                  trend: '↑ Live',
+                                  isTrendPositive: true,
+                                  onTap: () => widget.onNavigateTab?.call(2),
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
 
                         const SizedBox(height: 20),

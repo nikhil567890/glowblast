@@ -5,8 +5,8 @@ import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../data/models/customer.dart';
 import '../../../data/models/campaign.dart';
+import '../../../data/models/whatsapp_template.dart';
 import '../../../data/repositories/app_repository.dart';
-import '../../../data/demo_data/initial_data.dart';
 import 'sending_simulation_screen.dart';
 
 class CampaignWizardScreen extends StatefulWidget {
@@ -34,7 +34,8 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
   String _selectedAudienceType = 'All';
   final Set<String> _customCustomerIds = {};
 
-  // Step 2: Message
+  // Step 2: Message & Template
+  WhatsAppTemplate? _selectedTemplate;
   late TextEditingController _campaignNameController;
   late TextEditingController _messageController;
   bool _isGeneratingAi = false;
@@ -52,17 +53,18 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
         ? widget.repository.settings.businessName
         : 'our spa';
 
-    String initialTitle = 'Monsoon Glow Offer';
-    String initialMsg = '🌸 Monsoon Glow Special! Indulge in our soothing Aromatherapy or Facial with flat 30% OFF this week at $biz. Reply YES to reserve your slot!';
-
+    // Initialize template selection from repository
     if (widget.preselectedTemplateId != null) {
-      final tpl = InitialData.templates.firstWhere(
-        (t) => t['id'] == widget.preselectedTemplateId,
-        orElse: () => InitialData.templates.first,
-      );
-      initialTitle = tpl['title']!;
-      initialMsg = tpl['body']!;
+      _selectedTemplate = widget.repository.getTemplateById(widget.preselectedTemplateId!) ??
+          widget.repository.getTemplateByName(widget.preselectedTemplateId!);
     }
+
+    _selectedTemplate ??= widget.repository.approvedTemplates.firstOrNull ??
+        widget.repository.templates.firstOrNull;
+
+    String initialTitle = _selectedTemplate?.displayName ?? 'Monsoon Glow Offer';
+    String initialMsg = _selectedTemplate?.body ??
+        '🌸 Monsoon Glow Special! Indulge in our soothing Aromatherapy or Facial with flat 30% OFF this week at $biz. Reply YES to reserve your slot!';
 
     if (widget.preselectedAudience != null) {
       final a = widget.preselectedAudience!;
@@ -161,6 +163,24 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
     }
 
     final settings = widget.repository.settings;
+
+    // In WhatsApp mode, enforce approved template requirement
+    if (settings.isWhatsAppTestMode) {
+      if (_selectedTemplate == null || !_selectedTemplate!.canSend) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              _selectedTemplate == null
+                  ? 'Please select a valid approved WhatsApp template.'
+                  : 'This GlowBlast template is not connected to an approved WhatsApp template yet.',
+            ),
+            backgroundColor: AppColors.error,
+          ),
+        );
+        return;
+      }
+    }
+
     if (settings.isWhatsAppTestMode && recipients.length > 5) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -179,7 +199,7 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
     }
 
     if (_isSendNow) {
-      // Navigate to simulation / real send screen
+      // Navigate to simulation / real send screen with exact selected template
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
           builder: (context) => SendingSimulationScreen(
@@ -189,6 +209,10 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
             messageContent: _messageController.text.trim(),
             selectedCustomers: recipients,
             isRealTest: settings.isWhatsAppTestMode,
+            templateId: _selectedTemplate!.id,
+            templateName: _selectedTemplate!.metaTemplateName,
+            templateLanguage: _selectedTemplate!.metaLanguage,
+            templateVariables: _selectedTemplate!.variables,
           ),
         ),
       );
@@ -213,13 +237,14 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
         targetAudience: _getAudienceDisplayLabel(),
         messageContent: _messageController.text.trim(),
         recipients: recipients.length,
-        messagesSent: recipients.length,
+        messagesSent: 0, // Authoritative 0 initial sent count, never fake recipients count
         delivered: 0,
         read: 0,
         failed: 0,
         replied: 0,
         status: 'Scheduled',
         scheduledDate: fullScheduledDate,
+        templateName: _selectedTemplate?.name,
       );
 
       await widget.repository.addCampaign(newCampaign);
@@ -317,11 +342,16 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
                           );
                           return;
                         }
-                        if (_currentStep == 1 && _messageController.text.trim().isEmpty) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Please write or select a message.')),
-                          );
-                          return;
+                        if (_currentStep == 1) {
+                          if (_selectedTemplate == null || !_selectedTemplate!.canSend) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('This GlowBlast template is not connected to an approved WhatsApp template yet.'),
+                                backgroundColor: AppColors.error,
+                              ),
+                            );
+                            return;
+                          }
                         }
                         setState(() => _currentStep++);
                       },
@@ -337,22 +367,31 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
                             : 'Confirm Schedule',
                       ),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: (widget.repository.settings.isWhatsAppTestMode && recipients.length > 5)
+                        backgroundColor: (widget.repository.settings.isWhatsAppTestMode && recipients.length > 5) || (_selectedTemplate == null || !_selectedTemplate!.canSend)
                             ? Colors.grey
                             : AppColors.primarySage,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                       ),
-                      onPressed: (widget.repository.settings.isWhatsAppTestMode && recipients.length > 5)
+                      onPressed: (_selectedTemplate == null || !_selectedTemplate!.canSend)
                           ? () {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
-                                  content: Text('WhatsApp Test Mode allows up to 5 authorized recipients.'),
+                                  content: Text('This GlowBlast template is not connected to an approved WhatsApp template yet.'),
                                   backgroundColor: AppColors.error,
                                 ),
                               );
                             }
-                          : _submitCampaign,
+                          : (widget.repository.settings.isWhatsAppTestMode && recipients.length > 5)
+                              ? () {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('WhatsApp Test Mode allows up to 5 authorized recipients.'),
+                                      backgroundColor: AppColors.error,
+                                    ),
+                                  );
+                                }
+                              : _submitCampaign,
                     ),
                 ],
               ),
@@ -682,6 +721,144 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
           'Customize your promotional copy. Use tags for instant personalization.',
           style: TextStyle(fontSize: 13, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
         ),
+        const SizedBox(height: 18),
+
+        // WhatsApp Template Selector
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text('WhatsApp Message Template', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5)),
+            if (_selectedTemplate != null)
+              _buildTemplateStatusBadge(_selectedTemplate!.approvalStatus),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+          decoration: BoxDecoration(
+            color: isDark ? AppColors.cardDark : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: isDark ? AppColors.borderDark : Colors.grey.shade300),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<WhatsAppTemplate>(
+              value: _selectedTemplate,
+              isExpanded: true,
+              hint: const Text('Select an Approved Template'),
+              items: widget.repository.templates.map((tpl) {
+                return DropdownMenuItem<WhatsAppTemplate>(
+                  value: tpl,
+                  child: Row(
+                    children: [
+                      Icon(
+                        tpl.isApproved ? Icons.verified_rounded : Icons.pending_actions_rounded,
+                        size: 16,
+                        color: tpl.isApproved ? AppColors.whatsApp : AppColors.accentGold,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          tpl.displayName,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: tpl.isApproved ? null : AppColors.textMuted,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: (tpl.isApproved ? Colors.green : Colors.orange).withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          tpl.approvalStatus.toUpperCase(),
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: tpl.isApproved ? Colors.green.shade800 : Colors.orange.shade800,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+              onChanged: (newTemplate) {
+                if (newTemplate != null) {
+                  setState(() {
+                    final prevDisplayName = _selectedTemplate?.displayName;
+                    _selectedTemplate = newTemplate;
+                    _messageController.text = newTemplate.localBody;
+                    // Auto-update campaign title to match template if unchanged or empty
+                    if (_campaignNameController.text.trim().isEmpty ||
+                        _campaignNameController.text.trim() == prevDisplayName) {
+                      _campaignNameController.text = newTemplate.displayName;
+                    }
+                  });
+                }
+              },
+            ),
+          ),
+        ),
+
+        if (_selectedTemplate != null) ...[
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: _selectedTemplate!.isApproved
+                  ? AppColors.primarySageContainer.withValues(alpha: 0.5)
+                  : const Color(0xFFFEECEB),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: _selectedTemplate!.isApproved
+                    ? AppColors.primarySage.withValues(alpha: 0.3)
+                    : AppColors.error.withValues(alpha: 0.3),
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  _selectedTemplate!.isApproved ? Icons.check_circle_outline_rounded : Icons.warning_amber_rounded,
+                  size: 18,
+                  color: _selectedTemplate!.isApproved ? AppColors.primarySageDark : AppColors.error,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _selectedTemplate!.isApproved
+                            ? 'Meta Template: "${_selectedTemplate!.metaTemplateName}" (${_selectedTemplate!.metaLanguage}) • Category: ${_selectedTemplate!.category.toUpperCase()}'
+                            : 'This GlowBlast template is not connected to an approved WhatsApp template yet. Business-initiated WhatsApp broadcasts require an approved Meta template.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: _selectedTemplate!.isApproved ? AppColors.primarySageDark : AppColors.error,
+                        ),
+                      ),
+                      if (_selectedTemplate!.variables.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          'Variables: ${_selectedTemplate!.variables.map((v) => '{$v}').join(', ')}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: _selectedTemplate!.isApproved ? AppColors.primarySageDark : AppColors.error,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+
         const SizedBox(height: 18),
 
         // Campaign Name
@@ -1099,7 +1276,7 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
 
         const SizedBox(height: 16),
 
-        // WhatsApp Preview
+        // WhatsApp Meta Template & Message Transparency Card
         AppCard(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -1107,30 +1284,168 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
             children: [
               Row(
                 children: [
-                  const Icon(Icons.chat_rounded, color: AppColors.whatsApp, size: 18),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Resolved Message Preview (${firstCustomer?.name ?? "Client"})',
-                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+                  const Icon(Icons.verified_user_rounded, color: AppColors.whatsApp, size: 20),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Meta WhatsApp Template Verification',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
                   ),
+                  const Spacer(),
+                  if (_selectedTemplate != null)
+                    _buildTemplateStatusBadge(_selectedTemplate!.approvalStatus),
                 ],
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
+              _buildReviewRow('Selected GlowBlast Template', _selectedTemplate?.displayName ?? 'Custom / Unmapped'),
+              const SizedBox(height: 8),
+              _buildReviewRow('Actual Meta Template Name', _selectedTemplate?.metaTemplateName ?? 'None (Unmapped)', isSuccess: _selectedTemplate?.isApproved ?? false),
+              const SizedBox(height: 8),
+              _buildReviewRow('Template Language', _selectedTemplate?.metaLanguage ?? 'en_US'),
+              const SizedBox(height: 8),
+              _buildReviewRow('Approval Status', _selectedTemplate?.approvalStatus.toUpperCase() ?? 'NONE', isSuccess: _selectedTemplate?.isApproved ?? false),
+              const SizedBox(height: 8),
+              _buildReviewRow('Sample Recipient', '${firstCustomer?.name ?? "Recipient"} (${firstCustomer?.phone ?? ""})'),
+
+              const SizedBox(height: 14),
+              const Divider(height: 1),
+              const SizedBox(height: 14),
+
+              // Parameter Mapping Table
+              const Text(
+                'Variable Mapping & Meta Parameters',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+              ),
+              const SizedBox(height: 6),
+              if (_selectedTemplate != null && _selectedTemplate!.variables.isNotEmpty) ...[
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: isDark ? AppColors.surfaceDark : Colors.grey.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: isDark ? AppColors.borderDark : Colors.grey.shade200),
+                  ),
+                  child: Column(
+                    children: _selectedTemplate!.variables.asMap().entries.map((entry) {
+                      final idx = entry.key + 1;
+                      final varName = entry.value;
+                      String resolvedVal = '';
+                      if (varName == 'name') {
+                        resolvedVal = firstCustomer?.name ?? 'Recipient';
+                      } else if (varName == 'business_name') {
+                        resolvedVal = settings.businessName;
+                      } else {
+                        resolvedVal = 'Sample Value';
+                      }
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        child: Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: AppColors.primarySageContainer,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text('{{$idx}}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: AppColors.primarySageDark)),
+                            ),
+                            const SizedBox(width: 8),
+                            Text('{$varName}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12, color: AppColors.textMuted)),
+                            const SizedBox(width: 4),
+                            const Icon(Icons.arrow_forward, size: 12, color: Colors.grey),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                resolvedVal,
+                                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ] else ...[
+                Text(
+                  _selectedTemplate?.metaTemplateName == 'hello_world'
+                      ? 'No dynamic parameters (hello_world standard fixture)'
+                      : 'No variables configured for this template.',
+                  style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
+                ),
+              ],
+
+              const SizedBox(height: 14),
+
+              // Final Resolved WhatsApp Preview
+              Text(
+                'Final Message Preview (${firstCustomer?.name ?? "Recipient"})',
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5, color: AppColors.textMuted),
+              ),
+              const SizedBox(height: 6),
               Container(
+                width: double.infinity,
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: isDark ? const Color(0xFF1E2D24) : AppColors.whatsAppBg,
                   borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: AppColors.whatsApp.withValues(alpha: 0.3)),
                 ),
-                child: Text(
-                  previewResolved,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: isDark ? Colors.white : Colors.black87,
-                    height: 1.35,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _selectedTemplate != null && firstCustomer != null
+                          ? _selectedTemplate!.resolvePreview(
+                              customerName: firstCustomer.name,
+                              businessName: settings.businessName,
+                            )
+                          : previewResolved,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: isDark ? Colors.white : Colors.black87,
+                        height: 1.35,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Align(
+                      alignment: Alignment.bottomRight,
+                      child: Text(
+                        'Will be delivered via Meta Cloud API',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontStyle: FontStyle.italic,
+                          color: isDark ? Colors.white54 : Colors.black45,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
+
+              if (_selectedTemplate != null && !_selectedTemplate!.canSend) ...[
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEECEB),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.error.withValues(alpha: 0.4)),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.block_rounded, color: AppColors.error, size: 18),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'BLOCKED: This GlowBlast template is not connected to an approved WhatsApp template yet. You cannot dispatch unapproved templates.',
+                          style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold, color: AppColors.error),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -1190,6 +1505,43 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildTemplateStatusBadge(String status) {
+    Color bg;
+    Color fg;
+    switch (status.toLowerCase()) {
+      case 'approved':
+        bg = const Color(0xFFE8F5E9);
+        fg = const Color(0xFF2E7D32);
+        break;
+      case 'pending_approval':
+        bg = const Color(0xFFE3F2FD);
+        fg = const Color(0xFF1565C0);
+        break;
+      case 'draft':
+        bg = const Color(0xFFFFF3E0);
+        fg = const Color(0xFFE65100);
+        break;
+      case 'rejected':
+        bg = const Color(0xFFFFEBEE);
+        fg = const Color(0xFFC62828);
+        break;
+      default:
+        bg = Colors.grey.shade200;
+        fg = Colors.black54;
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        status.toUpperCase(),
+        style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: fg),
+      ),
     );
   }
 }

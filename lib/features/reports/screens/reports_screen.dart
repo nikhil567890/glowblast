@@ -179,65 +179,68 @@ class ReportsScreen extends StatelessWidget {
                               ),
                               const SizedBox(height: 16),
 
-                              // Grid of 4 key stats
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: _buildMetricTile(
-                                      'Total Sent',
-                                      '${repository.totalMessagesSent}',
-                                      Icons.outgoing_mail,
-                                      AppColors.primarySage,
-                                      isDark,
+                              // Grid of 4 key stats (EXACTLY equal width & height via IntrinsicHeight and unified layout)
+                              IntrinsicHeight(
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                                  children: [
+                                    Expanded(
+                                      child: _buildMetricTile(
+                                        'Total Sent',
+                                        '${repository.totalMessagesSent}',
+                                        Icons.outgoing_mail,
+                                        AppColors.primarySage,
+                                        isDark,
+                                        sub: 'All-time broadcasts',
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: _buildMetricTile(
-                                      'Delivered',
-                                      '${repository.totalDelivered}',
-                                      Icons.done_all_rounded,
-                                      AppColors.whatsApp,
-                                      isDark,
-                                      sub: '${repository.overallDeliveryRate.toStringAsFixed(1)}% rate',
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: _buildMetricTile(
+                                        'Delivered',
+                                        '${repository.totalDelivered}',
+                                        Icons.done_all_rounded,
+                                        AppColors.whatsApp,
+                                        isDark,
+                                        sub: '${repository.overallDeliveryRate.toStringAsFixed(1)}% delivery',
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
                               const SizedBox(height: 10),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: _buildMetricTile(
-                                      'Read',
-                                      '${repository.totalRead}',
-                                      Icons.mark_chat_read_rounded,
-                                      AppColors.info,
-                                      isDark,
-                                      sub: '${repository.overallReadRate.toStringAsFixed(1)}% rate',
+                              IntrinsicHeight(
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                                  children: [
+                                    Expanded(
+                                      child: _buildMetricTile(
+                                        'Read',
+                                        '${repository.totalRead}',
+                                        Icons.mark_chat_read_rounded,
+                                        AppColors.info,
+                                        isDark,
+                                        sub: '${repository.overallReadRate.toStringAsFixed(1)}% read rate',
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: _buildMetricTile(
-                                      'Replied',
-                                      '${repository.totalReplied}',
-                                      Icons.reply_rounded,
-                                      AppColors.accentGold,
-                                      isDark,
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: _buildMetricTile(
+                                        'Replied',
+                                        '${repository.totalReplied}',
+                                        Icons.reply_rounded,
+                                        AppColors.accentGold,
+                                        isDark,
+                                        sub: 'Client replies',
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
 
                               if (campaigns.isNotEmpty) ...[
-                                const SizedBox(height: 20),
-                                const Text(
-                                  'Campaign Dispatch Comparison',
-                                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
-                                ),
-                                const SizedBox(height: 12),
-                                _buildCampaignsBarChart(campaigns, isDark),
+                                const SizedBox(height: 22),
+                                _buildRolling6MonthsBarChart(campaigns, isDark),
                               ],
                             ],
                           ),
@@ -379,117 +382,282 @@ class ReportsScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildMetricTile(String label, String value, IconData icon, Color color, bool isDark, {String? sub}) {
+  Widget _buildMetricTile(
+    String label,
+    String value,
+    IconData icon,
+    Color color,
+    bool isDark, {
+    required String sub,
+  }) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: isDark ? AppColors.surfaceDark : Colors.grey.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.borderLight),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: isDark ? AppColors.borderDark : AppColors.borderLight),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Row(
             children: [
-              Icon(icon, size: 16, color: color),
-              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(icon, size: 16, color: color),
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   label,
-                  style: const TextStyle(fontSize: 11.5, color: AppColors.textMuted, fontWeight: FontWeight.w600),
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textMuted,
+                  ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 10),
           Text(
             value,
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: isDark ? AppColors.textLight : AppColors.textCharcoal),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+              letterSpacing: -0.5,
+              color: isDark ? AppColors.textLight : AppColors.textCharcoal,
+            ),
           ),
-          if (sub != null) ...[
-            const SizedBox(height: 2),
-            Text(sub, style: TextStyle(fontSize: 10.5, color: color, fontWeight: FontWeight.w600)),
-          ],
+          const SizedBox(height: 2),
+          Text(
+            sub,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildCampaignsBarChart(List<Campaign> campaigns, bool isDark) {
-    final list = campaigns.take(4).toList();
+  Widget _buildRolling6MonthsBarChart(List<Campaign> campaigns, bool isDark) {
+    // Dynamic rolling 6-month calculation: Current month + previous 5 months
+    final now = DateTime.now();
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-    return SizedBox(
-      height: 140,
-      child: BarChart(
-        BarChartData(
-          alignment: BarChartAlignment.spaceAround,
-          maxY: (campaigns.map((c) => c.messagesSent).fold(0, (a, b) => a > b ? a : b) * 1.15).toDouble().clamp(100, 300),
-          barTouchData: BarTouchData(
-            touchTooltipData: BarTouchTooltipData(
-              getTooltipColor: (_) => AppColors.primarySageDark,
-              getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                final c = list[group.x.toInt()];
-                return BarTooltipItem(
-                  '${c.name}\nDelivered: ${c.delivered}\nRead: ${c.read}',
-                  const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
-                );
-              },
-            ),
+    final monthlyData = <Map<String, dynamic>>[];
+    for (int i = 5; i >= 0; i--) {
+      int targetMonth = now.month - i;
+      int targetYear = now.year;
+      while (targetMonth <= 0) {
+        targetMonth += 12;
+        targetYear -= 1;
+      }
+
+      final monthStr = monthNames[targetMonth - 1];
+
+      // Aggregate matching real/stored campaigns for this month
+      final matches = campaigns.where((c) {
+        return c.date.month == targetMonth && c.date.year == targetYear;
+      }).toList();
+
+      int sent = matches.fold(0, (sum, c) => sum + c.messagesSent);
+      int delivered = matches.fold(0, (sum, c) => sum + c.delivered);
+      bool isDemo = false;
+
+      if (matches.isEmpty) {
+        // Fallback to demo profile dataset for months before active installation
+        final demoCamp = campaigns.firstWhere(
+          (c) => c.month.toLowerCase().startsWith(monthStr.toLowerCase()),
+          orElse: () => Campaign(
+            id: '',
+            name: '',
+            month: monthStr,
+            date: DateTime(targetYear, targetMonth, 1),
+            targetAudience: 'All Clients',
+            messageContent: '',
+            recipients: 0,
+            messagesSent: 0,
+            delivered: 0,
+            read: 0,
+            replied: 0,
+            failed: 0,
           ),
-          titlesData: FlTitlesData(
-            show: true,
-            bottomTitles: AxisTitles(
-              sideTitles: SideTitles(
-                showTitles: true,
-                getTitlesWidget: (value, meta) {
-                  final idx = value.toInt();
-                  if (idx >= 0 && idx < list.length) {
-                    return Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Text(
-                        list[idx].month,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
-                        ),
-                      ),
-                    );
-                  }
-                  return const SizedBox.shrink();
-                },
-              ),
-            ),
-            leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-            topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-            rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-          ),
-          gridData: const FlGridData(show: false),
-          borderData: FlBorderData(show: false),
-          barGroups: List.generate(list.length, (index) {
-            final c = list[index];
-            return BarChartGroupData(
-              x: index,
-              barRods: [
-                BarChartRodData(
-                  toY: c.delivered.toDouble(),
-                  color: AppColors.whatsApp,
-                  width: 14,
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
+        );
+        if (demoCamp.messagesSent > 0) {
+          sent = demoCamp.messagesSent;
+          delivered = demoCamp.delivered;
+          isDemo = !demoCamp.isRealTest;
+        } else {
+          const sampleSent = [110, 135, 125, 150, 180, 205];
+          const sampleDel = [102, 128, 118, 142, 172, 196];
+          final sIdx = (5 - i).clamp(0, 5);
+          sent = sampleSent[sIdx];
+          delivered = sampleDel[sIdx];
+          isDemo = true;
+        }
+      }
+
+      monthlyData.add({
+        'month': monthStr,
+        'year': targetYear,
+        'sent': sent,
+        'delivered': delivered,
+        'isDemo': isDemo,
+      });
+    }
+
+    final maxVal = monthlyData
+        .map((m) => (m['sent'] as int))
+        .fold(100, (a, b) => a > b ? a : b);
+    final chartMaxY = (maxVal * 1.25).toDouble().clamp(120.0, 500.0);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Title & Legend
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Campaign Dispatch Comparison',
+                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13.5),
                 ),
-                BarChartRodData(
-                  toY: c.read.toDouble(),
-                  color: AppColors.primarySageLight,
-                  width: 14,
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
+                const SizedBox(height: 2),
+                Text(
+                  'Rolling 6 Months (${monthlyData.first['month']} – ${monthlyData.last['month']} ${monthlyData.last['year']})',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                  ),
                 ),
               ],
-            );
-          }),
+            ),
+            // Legend
+            Row(
+              children: [
+                _buildLegendItem('Sent', AppColors.primarySageLight),
+                const SizedBox(width: 8),
+                _buildLegendItem('Delivered', AppColors.whatsApp),
+              ],
+            ),
+          ],
         ),
-      ),
+
+        const SizedBox(height: 14),
+
+        SizedBox(
+          height: 150,
+          child: BarChart(
+            BarChartData(
+              alignment: BarChartAlignment.spaceAround,
+              maxY: chartMaxY,
+              barTouchData: BarTouchData(
+                touchTooltipData: BarTouchTooltipData(
+                  getTooltipColor: (_) => AppColors.primarySageDark,
+                  getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                    final item = monthlyData[group.x.toInt()];
+                    return BarTooltipItem(
+                      '${item['month']} ${item['year']}\nSent: ${item['sent']}\nDelivered: ${item['delivered']}',
+                      const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
+                    );
+                  },
+                ),
+              ),
+              titlesData: FlTitlesData(
+                show: true,
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    getTitlesWidget: (value, meta) {
+                      final idx = value.toInt();
+                      if (idx >= 0 && idx < monthlyData.length) {
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            monthlyData[idx]['month'] as String,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                            ),
+                          ),
+                        );
+                      }
+                      return const SizedBox.shrink();
+                    },
+                  ),
+                ),
+                leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+              ),
+              gridData: const FlGridData(show: false),
+              borderData: FlBorderData(show: false),
+              barGroups: List.generate(monthlyData.length, (index) {
+                final item = monthlyData[index];
+                return BarChartGroupData(
+                  x: index,
+                  barsSpace: 4,
+                  barRods: [
+                    BarChartRodData(
+                      toY: (item['sent'] as int).toDouble(),
+                      color: AppColors.primarySageLight,
+                      width: 9,
+                      borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
+                    ),
+                    BarChartRodData(
+                      toY: (item['delivered'] as int).toDouble(),
+                      color: AppColors.whatsApp,
+                      width: 9,
+                      borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
+                    ),
+                  ],
+                );
+              }),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLegendItem(String label, Color color) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: AppColors.textMuted),
+        ),
+      ],
     );
   }
 

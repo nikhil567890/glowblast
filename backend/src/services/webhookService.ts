@@ -43,8 +43,11 @@ export class WebhookService {
                 console.error(`[Webhook] Message failed. Code: ${err.code}, Title: ${err.title}`);
               }
 
-              // Update in store
+              // Update in store (enforcing monotonic hierarchy and idempotency)
               messageStore.updateStatus(msg.id, newStatus, providerMessageId, errorObj);
+
+              // Recalculate and persist updated campaign status
+              campaignStore.recalculateAndSaveCampaignStatus(msg.campaignId);
 
               // Broadcast via SSE to connected APK client
               realtimeService.broadcastMessageStatus({

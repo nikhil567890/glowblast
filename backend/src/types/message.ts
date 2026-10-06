@@ -22,9 +22,13 @@ export interface StoredMessage {
   normalizedPhone: string;
   status: MessageStatus;
   providerMessageId?: string;
+  templateName?: string;
+  templateLanguage?: string;
   errorCode?: number;
   errorTitle?: string;
   errorMessage?: string;
+  errorDetails?: string;
   createdAt: string;
   updatedAt: string;
 }
+

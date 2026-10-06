@@ -2,6 +2,17 @@ import fs from 'fs';
 import path from 'path';
 import { StoredMessage, MessageStatus } from '../types/message';
 
+const STATUS_PRECEDENCE: Record<MessageStatus, number> = {
+  queued: 0,
+  sending: 1,
+  accepted: 2,
+  sent: 3,
+  delivered: 4,
+  read: 5,
+  failed: 10,
+  excluded_opt_out: 10,
+};
+
 class MessageStore {
   private messages = new Map<string, StoredMessage>(); // key: internalId (e.g. campaignId_localCustomerId)
   private providerIdIndex = new Map<string, string>(); // providerMessageId -> internalId
@@ -75,16 +86,40 @@ class MessageStore {
     return updated;
   }
 
+  /**
+   * Updates message status enforcing monotonic progression.
+   * A higher status (e.g. read, delivered) will never be overwritten by a lower status (e.g. sent, accepted).
+   */
   public updateStatus(
     id: string,
     status: MessageStatus,
     providerMessageId?: string,
-    error?: { code?: number; title?: string; message?: string }
+    error?: { code?: number; title?: string; message?: string; details?: string }
   ): StoredMessage | undefined {
     const msg = this.messages.get(id);
     if (!msg) return undefined;
 
-    msg.status = status;
+    const currentWeight = STATUS_PRECEDENCE[msg.status] ?? 0;
+    const newWeight = STATUS_PRECEDENCE[status] ?? 0;
+
+    // Enforce monotonic progression: do not overwrite a higher status with an earlier status
+    // Exception: transition to failed or excluded_opt_out is always allowed unless already failed/excluded
+    const isTerminal = status === 'failed' || status === 'excluded_opt_out';
+    const isCurrentTerminal = msg.status === 'failed' || msg.status === 'excluded_opt_out';
+
+    if (isCurrentTerminal) {
+      // Once failed or excluded, ignore earlier status webhooks
+      if (!isTerminal) {
+        console.log(`[MessageStore] Ignoring status '${status}' for terminal message ${id} (${msg.status})`);
+      }
+    } else if (newWeight >= currentWeight || isTerminal) {
+      msg.status = status;
+    } else {
+      console.log(
+        `[MessageStore] Preserving higher status '${msg.status}' over incoming earlier status '${status}' for ${id}`
+      );
+    }
+
     if (providerMessageId) {
       msg.providerMessageId = providerMessageId;
       this.providerIdIndex.set(providerMessageId, msg.id);
@@ -93,11 +128,21 @@ class MessageStore {
       msg.errorCode = error.code;
       msg.errorTitle = error.title;
       msg.errorMessage = error.message;
+      if (error.details) {
+        msg.errorDetails = error.details;
+      }
     }
     msg.updatedAt = new Date().toISOString();
     this.saveToDisk();
     return msg;
   }
+
+  public clear(): void {
+    this.messages.clear();
+    this.providerIdIndex.clear();
+    this.saveToDisk();
+  }
 }
 
 export const messageStore = new MessageStore();
+

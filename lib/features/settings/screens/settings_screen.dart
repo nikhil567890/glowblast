@@ -1,9 +1,12 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/constants/api_constants.dart';
 import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../data/repositories/app_repository.dart';
 import '../../../services/excel_service.dart';
+import '../../../services/glowblast_backend_client.dart';
 import '../../auth/screens/landing_screen.dart';
 import 'opt_out_screen.dart';
 import 'buy_credits_screen.dart';
@@ -20,6 +23,8 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _isCheckingBackend = false;
   bool? _isBackendOnline;
+  BackendHealthStatus? _lastHealthStatus;
+  bool _showDiagnostics = false;
 
   @override
   void initState() {
@@ -34,56 +39,95 @@ class _SettingsScreenState extends State<SettingsScreen> {
       setState(() {
         _isCheckingBackend = false;
         _isBackendOnline = status.isOnline;
+        _lastHealthStatus = status;
       });
     }
   }
 
   void _editBackendUrl() {
-    final urlCtrl = TextEditingController(text: widget.repository.settings.backendUrl);
+    final currentUrl = widget.repository.settings.backendUrl;
+    final urlCtrl = TextEditingController(text: currentUrl);
+    String? errorText;
+
     showDialog(
       context: context,
-      builder: (dialogCtx) => AlertDialog(
-        title: const Text('Backend Server URL'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Specify your GlowBlast backend URL (e.g. http://10.0.2.2:3000 for emulator, or https://YOUR-DOMAIN):',
-              style: TextStyle(fontSize: 12.5),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: urlCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Backend URL',
-                hintText: 'http://10.0.2.2:3000',
-                prefixIcon: Icon(Icons.dns_rounded),
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Backend Server URL'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Specify your GlowBlast backend base URL. The default cloud production server is:',
+                style: TextStyle(fontSize: 12.5),
               ),
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: AppColors.primarySageContainer.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const SelectableText(
+                  ApiConstants.defaultProductionBackendUrl,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.primarySage),
+                ),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: urlCtrl,
+                decoration: InputDecoration(
+                  labelText: 'Backend URL',
+                  hintText: ApiConstants.defaultProductionBackendUrl,
+                  prefixIcon: const Icon(Icons.dns_rounded),
+                  errorText: errorText,
+                ),
+                onChanged: (_) {
+                  if (errorText != null) {
+                    setDialogState(() => errorText = null);
+                  }
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                urlCtrl.text = ApiConstants.defaultProductionBackendUrl;
+                setDialogState(() => errorText = null);
+              },
+              child: const Text('Reset Default'),
             ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogCtx), child: const Text('Cancel')),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primarySage,
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () async {
-              final newUrl = urlCtrl.text.trim();
-              if (newUrl.isNotEmpty) {
+            TextButton(onPressed: () => Navigator.pop(dialogCtx), child: const Text('Cancel')),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primarySage,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () async {
+                var newUrl = urlCtrl.text.trim();
+                if (newUrl.isEmpty) {
+                  newUrl = ApiConstants.defaultProductionBackendUrl;
+                }
+                if (kReleaseMode && !newUrl.startsWith('https://')) {
+                  setDialogState(() {
+                    errorText = 'Release builds require a secure HTTPS URL (https://...)';
+                  });
+                  return;
+                }
                 Navigator.pop(dialogCtx);
-                final updated = widget.repository.settings.copyWith(backendUrl: newUrl);
+                final normalized = ApiConstants.normalizeBackendUrl(newUrl);
+                final updated = widget.repository.settings.copyWith(backendUrl: normalized);
                 await widget.repository.updateSettings(updated);
                 if (mounted) {
                   _checkBackendStatus();
                 }
-              }
-            },
-            child: const Text('Save & Reconnect'),
-          ),
-        ],
+              },
+              child: const Text('Save & Reconnect'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -182,6 +226,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
               );
             },
             child: const Text('Save Profile'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmLogout() {
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('Log out of GlowBlast?'),
+        content: const Text(
+          'Are you sure you want to log out? You will need to sign in again to access the application. Your campaign history and customer database will remain safely stored on this device.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.error,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () async {
+              Navigator.pop(dialogCtx);
+              // 1. Call backend logout when applicable
+              await widget.repository.backendClient.logout(
+                token: widget.repository.authToken,
+              );
+              // 2. Clear local auth session securely
+              await widget.repository.clearAuthSession();
+              // 3. Navigate to Landing Page/Login
+              if (!mounted) return;
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(
+                  builder: (context) => LandingScreen(repository: widget.repository),
+                ),
+                (route) => false,
+              );
+            },
+            child: const Text('Log Out'),
           ),
         ],
       ),
@@ -295,6 +381,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             _buildInfoRow('Business Name', displayBusiness, isDark),
                             const SizedBox(height: 10),
                             _buildInfoRow('Contact Phone', displayPhone, isDark),
+                            if (widget.repository.currentUser?.email != null) ...[
+                              const SizedBox(height: 10),
+                              _buildInfoRow('Account Email', widget.repository.currentUser!.email, isDark),
+                            ],
+                            const Divider(height: 24),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Icon(Icons.shield_outlined, size: 14, color: AppColors.success),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      widget.repository.isAuthenticated
+                                          ? 'Verified Account Session'
+                                          : 'Local Guest Mode',
+                                      style: TextStyle(
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w600,
+                                        color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                OutlinedButton.icon(
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: AppColors.error,
+                                    side: const BorderSide(color: AppColors.error, width: 1.2),
+                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                  ),
+                                  icon: const Icon(Icons.logout_rounded, size: 16),
+                                  label: const Text(
+                                    'Log Out',
+                                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                                  ),
+                                  onPressed: _confirmLogout,
+                                ),
+                              ],
+                            ),
                           ],
                         ),
                       ),
@@ -395,26 +523,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               Container(
                                 padding: const EdgeInsets.all(12),
                                 decoration: BoxDecoration(
-                                  color: isDark ? AppColors.surfaceDark : const Color(0xFFE8F5E9),
+                                  color: isDark
+                                      ? AppColors.surfaceDark
+                                      : (_isBackendOnline == true
+                                          ? const Color(0xFFE8F5E9)
+                                          : const Color(0xFFFFEBEE)),
                                   borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(color: const Color(0xFFC8E6C9)),
+                                  border: Border.all(
+                                    color: _isBackendOnline == true
+                                        ? const Color(0xFFC8E6C9)
+                                        : const Color(0xFFFFCDD2),
+                                  ),
                                 ),
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const Row(
+                                    Row(
                                       children: [
-                                        Icon(Icons.shield_outlined, size: 16, color: AppColors.success),
-                                        SizedBox(width: 6),
-                                        Text(
-                                          'Connected through GlowBlast backend',
-                                          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.success),
+                                        Icon(
+                                          _isBackendOnline == true
+                                              ? Icons.cloud_done_rounded
+                                              : Icons.cloud_off_rounded,
+                                          size: 16,
+                                          color: _isBackendOnline == true ? AppColors.success : AppColors.error,
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Expanded(
+                                          child: Text(
+                                            _isCheckingBackend
+                                                ? 'Checking backend connection...'
+                                                : (_isBackendOnline == true
+                                                    ? 'Backend Online · Official Meta API Active'
+                                                    : 'Backend Offline · Unable to reach server'),
+                                            style: TextStyle(
+                                              fontSize: 12.5,
+                                              fontWeight: FontWeight.w700,
+                                              color: _isBackendOnline == true ? AppColors.success : AppColors.error,
+                                            ),
+                                          ),
                                         ),
                                       ],
                                     ),
                                     const SizedBox(height: 6),
                                     const Text(
-                                      'Test Display Number: +1 (555) 632-5494\nRecipient Limit: Up to 5 authorized Meta test numbers\nAccess Token: Kept secret on backend server only.',
+                                      'Test Display Number: +1 (555) 632-5494\nRecipient Limit: Up to 5 authorized Meta test numbers\nAccess Token: Kept secret on cloud backend server only.',
                                       style: TextStyle(fontSize: 11.5, height: 1.4, color: AppColors.textMuted),
                                     ),
                                     const Divider(height: 16),
@@ -441,6 +593,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                         ),
                                       ],
                                     ),
+                                    // Connection diagnostics toggle & panel
+                                    InkWell(
+                                      onTap: () => setState(() => _showDiagnostics = !_showDiagnostics),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(vertical: 4),
+                                        child: Row(
+                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                          children: [
+                                            Text(
+                                              _showDiagnostics ? 'Hide Diagnostics ▲' : 'Connection Diagnostics ▼',
+                                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.primarySage),
+                                            ),
+                                            Text(
+                                              _lastHealthStatus != null
+                                                  ? '${_lastHealthStatus!.statusCode ?? "ERR"} · ${_lastHealthStatus!.latency?.inMilliseconds ?? 0}ms'
+                                                  : 'Tap to inspect',
+                                              style: const TextStyle(fontSize: 10.5, color: AppColors.textMuted),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                    if (_showDiagnostics) ...[
+                                      Container(
+                                        margin: const EdgeInsets.only(top: 6),
+                                        padding: const EdgeInsets.all(8),
+                                        decoration: BoxDecoration(
+                                          color: isDark ? AppColors.cardDark : Colors.white,
+                                          borderRadius: BorderRadius.circular(6),
+                                          border: Border.all(color: AppColors.borderLight),
+                                        ),
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text('Base URL: ${settings.backendUrl}', style: const TextStyle(fontSize: 10.5, fontFamily: 'monospace')),
+                                            Text('Health Check: ${settings.backendUrl}/health', style: const TextStyle(fontSize: 10.5, fontFamily: 'monospace')),
+                                            Text('Connection State: ${_isBackendOnline == true ? "🟢 Online" : "🔴 Offline"}', style: const TextStyle(fontSize: 10.5)),
+                                            Text('HTTP Status: ${_lastHealthStatus?.statusCode != null ? "${_lastHealthStatus!.statusCode} OK" : "N/A"}', style: const TextStyle(fontSize: 10.5)),
+                                            Text('Latency: ${_lastHealthStatus?.latency != null ? "${_lastHealthStatus!.latency!.inMilliseconds} ms" : "N/A"}', style: const TextStyle(fontSize: 10.5)),
+                                            Text('Last Checked: ${_lastHealthStatus != null ? "${_lastHealthStatus!.checkedAt.hour.toString().padLeft(2, '0')}:${_lastHealthStatus!.checkedAt.minute.toString().padLeft(2, '0')}:${_lastHealthStatus!.checkedAt.second.toString().padLeft(2, '0')}" : "Not checked yet"}', style: const TextStyle(fontSize: 10.5)),
+                                            if (_lastHealthStatus?.error != null)
+                                              Padding(
+                                                padding: const EdgeInsets.only(top: 2),
+                                                child: Text('Error: ${_lastHealthStatus!.error}', style: const TextStyle(fontSize: 10.5, color: AppColors.error)),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
                                   ],
                                 ),
                               ),

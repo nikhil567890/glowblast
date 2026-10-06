@@ -82,36 +82,41 @@ class StatCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.w800,
-              letterSpacing: -0.5,
-              color: isDark ? AppColors.textLight : AppColors.textCharcoal,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 12.5,
-              fontWeight: FontWeight.w500,
-              color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
-            ),
-          ),
-          if (subtitle != null) ...[
-            const SizedBox(height: 2),
-            Text(
-              subtitle!,
-              style: TextStyle(
-                fontSize: 10.5,
-                color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                value,
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.5,
+                  color: isDark ? AppColors.textLight : AppColors.textCharcoal,
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: 2),
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? AppColors.textLight : AppColors.textCharcoal,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle ?? '',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 10.5,
+                  color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );

@@ -148,33 +148,41 @@ class _CampaignsScreenState extends State<CampaignsScreen> with SingleTickerProv
                       style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
                     ),
                   ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: AppColors.whatsAppBg,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.chat_rounded, size: 12, color: AppColors.whatsApp),
-                        SizedBox(width: 4),
-                        Text(
-                          'WhatsApp',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.whatsApp,
-                          ),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      _buildStatusBadge(c.status),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: AppColors.whatsAppBg,
+                          borderRadius: BorderRadius.circular(10),
                         ),
-                      ],
-                    ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.chat_rounded, size: 12, color: AppColors.whatsApp),
+                            SizedBox(width: 4),
+                            Text(
+                              'WhatsApp',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.whatsApp,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
               const SizedBox(height: 4),
               Text(
-                'Sent ${dateFormat.format(c.date)} • ${c.targetAudience}',
+                '${c.status == "Failed" ? "Dispatched" : "Sent"} ${dateFormat.format(c.date)} • ${c.targetAudience} (${c.recipients} total)',
                 style: TextStyle(fontSize: 11.5, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
               ),
               const SizedBox(height: 10),
@@ -186,20 +194,60 @@ class _CampaignsScreenState extends State<CampaignsScreen> with SingleTickerProv
               ),
               const Divider(height: 20),
 
-              // KPI Row: Sent, Delivered, Read, Replied
+              // KPI Row: Sent, Delivered, Read, Failed
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   _buildMetric('Sent', '${c.messagesSent}'),
                   _buildMetric('Delivered', '${c.delivered} (${c.deliveryRate.toStringAsFixed(0)}%)'),
                   _buildMetric('Read', '${c.read} (${c.readRate.toStringAsFixed(0)}%)'),
-                  _buildMetric('Replied', '${c.replied}'),
+                  _buildMetric('Failed', '${c.failed}', isError: c.failed > 0),
                 ],
               ),
             ],
           ),
         );
       },
+    );
+  }
+
+  Widget _buildStatusBadge(String status) {
+    Color bg;
+    Color fg;
+    String label = status;
+
+    final lower = status.toLowerCase();
+    if (lower.contains('with_errors') || lower.contains('with errors')) {
+      bg = const Color(0xFFFEF3C7);
+      fg = const Color(0xFFD97706);
+      label = 'Partial';
+    } else if (lower.contains('failed')) {
+      bg = const Color(0xFFFEE2E2);
+      fg = AppColors.error;
+      label = 'Failed';
+    } else if (lower.contains('completed') || lower.contains('sent')) {
+      bg = AppColors.primarySageContainer;
+      fg = AppColors.primarySageDark;
+      label = 'Completed';
+    } else if (lower.contains('processing') || lower.contains('accepted')) {
+      bg = const Color(0xFFE0F2FE);
+      fg = const Color(0xFF0284C7);
+      label = 'In Progress';
+    } else {
+      bg = Colors.grey.shade200;
+      fg = Colors.grey.shade800;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: fg),
+      ),
     );
   }
 
@@ -299,7 +347,7 @@ class _CampaignsScreenState extends State<CampaignsScreen> with SingleTickerProv
     );
   }
 
-  Widget _buildMetric(String label, String value, {bool highlight = false}) {
+  Widget _buildMetric(String label, String value, {bool highlight = false, bool isError = false}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -313,10 +361,15 @@ class _CampaignsScreenState extends State<CampaignsScreen> with SingleTickerProv
           style: TextStyle(
             fontSize: 13,
             fontWeight: FontWeight.w700,
-            color: highlight ? AppColors.primarySage : null,
+            color: isError
+                ? AppColors.error
+                : highlight
+                    ? AppColors.primarySage
+                    : null,
           ),
         ),
       ],
     );
   }
 }
+

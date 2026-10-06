@@ -50,8 +50,9 @@ router.post('/send', async (req: Request, res: Response) => {
 router.get('/:campaignId', (req: Request, res: Response) => {
   const { campaignId } = req.params;
   const summary = campaignStore.getSummary(campaignId);
+  const camp = campaignStore.get(campaignId);
 
-  if (!summary) {
+  if (!summary || !camp) {
     res.status(404).json({
       success: false,
       error: {
@@ -64,13 +65,17 @@ router.get('/:campaignId', (req: Request, res: Response) => {
 
   res.json({
     success: true,
-    campaign: summary,
+    campaign: {
+      ...summary,
+      messages: camp.messages,
+    },
   });
 });
 
 /**
  * GET /api/campaigns/:campaignId/status
- * Returns campaign status counters and processing state.
+ * Returns authoritative campaign status counters and processing state.
+ * Implements canonical schema expected by Flutter client.
  */
 router.get('/:campaignId/status', (req: Request, res: Response) => {
   const { campaignId } = req.params;
@@ -90,15 +95,20 @@ router.get('/:campaignId/status', (req: Request, res: Response) => {
   res.json({
     success: true,
     campaignId: summary.campaignId,
+    campaignName: summary.campaignName,
     status: summary.status,
     total: summary.total,
+    queued: summary.queued,
     accepted: summary.accepted,
     sent: summary.sent,
     delivered: summary.delivered,
     read: summary.read,
     failed: summary.failed,
+    excludedOptOut: summary.excludedOptOut,
+    campaign: summary,
   });
 });
+
 
 /**
  * GET /api/campaigns/:campaignId/events

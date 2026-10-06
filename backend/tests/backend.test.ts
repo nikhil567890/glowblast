@@ -1,13 +1,17 @@
-import { test, describe, beforeEach } from 'node:test';
+process.env.NODE_ENV = 'test';
+import { test, describe, beforeEach, after } from 'node:test';
 import assert from 'node:assert';
+import { AddressInfo } from 'net';
+import jwt from 'jsonwebtoken';
 import { normalizeWhatsAppPhone, maskPhone } from '../src/utils/phone';
-import { getSafeConfigStatus, getAuthorizedTestRecipients } from '../src/config/env';
+import { getSafeConfigStatus, getAuthorizedTestRecipients, env } from '../src/config/env';
 import { CampaignService } from '../src/services/campaignService';
 import { campaignStore } from '../src/store/campaignStore';
 import { messageStore } from '../src/store/messageStore';
 import { WebhookService } from '../src/services/webhookService';
 import { templateStore } from '../src/store/templateStore';
 import { TemplateService } from '../src/services/templateService';
+import { app } from '../src/server';
 
 describe('Phone Normalization & Masking', () => {
   test('normalizeWhatsAppPhone handles Indian 10-digit formats', () => {
@@ -16,6 +20,9 @@ describe('Phone Normalization & Masking', () => {
     assert.strictEqual(normalizeWhatsAppPhone('+91-9876543210'), '919876543210');
     assert.strictEqual(normalizeWhatsAppPhone('09876543210'), '919876543210');
     assert.strictEqual(normalizeWhatsAppPhone('919876543210'), '919876543210');
+    assert.strictEqual(normalizeWhatsAppPhone('0091 91827 69155'), '919182769155');
+    assert.strictEqual(normalizeWhatsAppPhone('+91 91827 69155'), '919182769155');
+    assert.strictEqual(normalizeWhatsAppPhone('919182769155'), '919182769155');
   });
 
   test('normalizeWhatsAppPhone rejects invalid numbers and scientific notation', () => {
@@ -535,3 +542,218 @@ describe('Template Management, Parameter Mapping & Approval Gates', () => {
     assert.strictEqual(result.campaign?.messages[0].templateLanguage, 'hi');
   });
 });
+
+describe('Campaign Send API Endpoint & JWT Authentication', () => {
+  let server: any;
+  let baseUrl: string;
+  let validToken: string;
+  let expiredToken: string;
+
+  beforeEach(() => {
+    if (!server) {
+      server = app.listen(0);
+      server.unref();
+      const port = (server.address() as AddressInfo).port;
+      baseUrl = `http://127.0.0.1:${port}`;
+      validToken = jwt.sign(
+        { sub: 'usr_test_123', email: 'owner@glowblast.com', name: 'Spa Owner' },
+        env.JWT_SECRET,
+        { expiresIn: '1h' }
+      );
+      expiredToken = jwt.sign(
+        { sub: 'usr_expired' },
+        env.JWT_SECRET,
+        { expiresIn: -10 }
+      );
+    }
+  });
+
+  after(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => {
+        if (typeof server.closeAllConnections === 'function') {
+          server.closeAllConnections();
+        }
+        server.close(() => resolve());
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  });
+
+  test('1. Valid authenticated campaign request accepted with 202', async () => {
+    const res = await fetch(`${baseUrl}/api/campaigns/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${validToken}`,
+      },
+      body: JSON.stringify({
+        campaignName: 'GlowBlast Hello World Test',
+        templateName: 'hello_world',
+        templateLanguage: 'en_US',
+        recipients: [{ phone: '919182769155' }],
+      }),
+    });
+
+    assert.strictEqual(res.status, 202);
+    const data = (await res.json()) as any;
+    assert.strictEqual(data.success, true);
+    assert.ok(data.campaignId);
+    assert.strictEqual(data.status, 'processing');
+  });
+
+  test('2. Missing Authorization header returns 401 UNAUTHORIZED', async () => {
+    const res = await fetch(`${baseUrl}/api/campaigns/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        campaignName: 'No Auth Test',
+        templateName: 'hello_world',
+        recipients: [{ phone: '919182769155' }],
+      }),
+    });
+
+    assert.strictEqual(res.status, 401);
+    const data = (await res.json()) as any;
+    assert.strictEqual(data.success, false);
+    assert.strictEqual(data.error?.code, 'UNAUTHORIZED');
+    assert.strictEqual(data.error?.message, 'Authentication required');
+  });
+
+  test('3. Invalid JWT token returns 401 UNAUTHORIZED', async () => {
+    const res = await fetch(`${baseUrl}/api/campaigns/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer invalid_signature_token_xyz',
+      },
+      body: JSON.stringify({
+        campaignName: 'Invalid Token Test',
+        templateName: 'hello_world',
+        recipients: [{ phone: '919182769155' }],
+      }),
+    });
+
+    assert.strictEqual(res.status, 401);
+    const data = (await res.json()) as any;
+    assert.strictEqual(data.success, false);
+    assert.strictEqual(data.error?.code, 'UNAUTHORIZED');
+  });
+
+  test('4. Expired JWT token returns 401 UNAUTHORIZED', async () => {
+    const res = await fetch(`${baseUrl}/api/campaigns/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${expiredToken}`,
+      },
+      body: JSON.stringify({
+        campaignName: 'Expired Token Test',
+        templateName: 'hello_world',
+        recipients: [{ phone: '919182769155' }],
+      }),
+    });
+
+    assert.strictEqual(res.status, 401);
+    const data = (await res.json()) as any;
+    assert.strictEqual(data.success, false);
+    assert.strictEqual(data.error?.code, 'UNAUTHORIZED');
+  });
+
+  test('5. Missing campaignName returns 400 VALIDATION_ERROR with field', async () => {
+    const res = await fetch(`${baseUrl}/api/campaigns/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${validToken}`,
+      },
+      body: JSON.stringify({
+        templateName: 'hello_world',
+        recipients: [{ phone: '919182769155' }],
+      }),
+    });
+
+    assert.strictEqual(res.status, 400);
+    const data = (await res.json()) as any;
+    assert.strictEqual(data.success, false);
+    assert.strictEqual(data.error?.code, 'VALIDATION_ERROR');
+    assert.ok(data.error?.fields.includes('campaignName'));
+  });
+
+  test('6. Missing templateName returns 400 VALIDATION_ERROR with field', async () => {
+    const res = await fetch(`${baseUrl}/api/campaigns/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${validToken}`,
+      },
+      body: JSON.stringify({
+        campaignName: 'Missing Template Test',
+        recipients: [{ phone: '919182769155' }],
+      }),
+    });
+
+    assert.strictEqual(res.status, 400);
+    const data = (await res.json()) as any;
+    assert.strictEqual(data.success, false);
+    assert.strictEqual(data.error?.code, 'VALIDATION_ERROR');
+    assert.ok(data.error?.fields.includes('templateName'));
+  });
+
+  test('7. Empty recipients array returns 400 VALIDATION_ERROR', async () => {
+    const res = await fetch(`${baseUrl}/api/campaigns/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${validToken}`,
+      },
+      body: JSON.stringify({
+        campaignName: 'Empty Recipients Test',
+        templateName: 'hello_world',
+        recipients: [],
+      }),
+    });
+
+    assert.strictEqual(res.status, 400);
+    const data = (await res.json()) as any;
+    assert.strictEqual(data.success, false);
+    assert.strictEqual(data.error?.code, 'VALIDATION_ERROR');
+    assert.ok(data.error?.fields.includes('recipients'));
+  });
+
+  test('8. Full Flutter payload with null properties parses and dispatches successfully', async () => {
+    const res = await fetch(`${baseUrl}/api/campaigns/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${validToken}`,
+      },
+      body: JSON.stringify({
+        campaignId: `GB-${Date.now()}`,
+        campaignName: 'Full Flutter APK Test',
+        businessName: null,
+        templateId: null,
+        templateName: 'hello_world',
+        templateLanguage: 'en_US',
+        templateVariables: [],
+        recipients: [
+          {
+            localCustomerId: 'cust_1',
+            name: 'Authorized Tester',
+            phone: '+91 91827 69155',
+          },
+        ],
+        optedOutPhones: [],
+        metadata: null,
+      }),
+    });
+
+    assert.strictEqual(res.status, 202);
+    const data = (await res.json()) as any;
+    assert.strictEqual(data.success, true);
+    assert.strictEqual(data.total, 1);
+  });
+});
+

@@ -111,10 +111,10 @@ router.post('/send', async (req: Request, res: Response) => {
 
   const result = await WhatsAppService.sendTemplateMessage({
     recipientPhone: normalizedPhone,
-    recipientName: name,
+    recipientName: name ?? undefined,
     templateName: effectiveMetaTemplateName,
     templateLanguage: effectiveLanguage,
-    templateComponents: effectiveMetaTemplateName === 'hello_world' ? undefined : effectiveComponents,
+    templateComponents: effectiveMetaTemplateName === 'hello_world' ? undefined : ((effectiveComponents ?? undefined) as any),
   });
 
   if (!result.success) {

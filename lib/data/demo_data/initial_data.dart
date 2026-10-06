@@ -35,6 +35,20 @@ class InitialData {
       final bool isOptedOut = i < 12;
       final createdAt = now.subtract(Duration(days: (200 - i) * 2));
 
+      // Customer at index 12 is the primary authorized Meta test recipient
+      if (i == 12) {
+        list.add(
+          Customer(
+            id: 'cust_meta_tester',
+            name: 'Authorized Meta Tester',
+            phone: '+91 91827 69155',
+            isOptedOut: false,
+            createdAt: createdAt,
+          ),
+        );
+        continue;
+      }
+
       list.add(
         Customer(
           id: 'cust_${i + 1}',

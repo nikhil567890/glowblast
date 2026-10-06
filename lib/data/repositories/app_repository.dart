@@ -235,9 +235,6 @@ class AppRepository extends ChangeNotifier {
       _settings = AppSettings();
     }
 
-    // Always re-sync backendClient with active settings
-    backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
-
     // Load persisted auth session
     _authToken = prefs.getString(_keyAuthToken);
     final userRaw = prefs.getString(_keyAuthUser);
@@ -248,12 +245,36 @@ class AppRepository extends ChangeNotifier {
         _currentUser = null;
       }
     }
+
+    // Always re-sync backendClient with active settings and persisted token
+    backendClient = GlowBlastBackendClient(
+      baseUrl: _settings.backendUrl,
+      authToken: _authToken,
+    );
+
+    // Ensure authorized Meta test recipient is in directory
+    final hasTester = _customers.any((c) =>
+      c.phone.replaceAll(RegExp(r'\D'), '').endsWith('9182769155')
+    );
+    if (!hasTester) {
+      final insertIndex = 12 < _customers.length ? 12 : 0;
+      _customers.insert(
+        insertIndex,
+        Customer(
+          id: 'cust_meta_tester',
+          name: 'Authorized Meta Tester',
+          phone: '+91 91827 69155',
+          isOptedOut: false,
+        ),
+      );
+    }
   }
 
   /// Securely saves authenticated session and user profile.
   Future<void> saveAuthSession(String token, AuthUser user) async {
     _authToken = token;
     _currentUser = user;
+    backendClient.authToken = token;
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyAuthToken, token);
@@ -264,6 +285,7 @@ class AppRepository extends ChangeNotifier {
   Future<void> clearAuthSession() async {
     _authToken = null;
     _currentUser = null;
+    backendClient.authToken = null;
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_keyAuthToken);

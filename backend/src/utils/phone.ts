@@ -22,6 +22,11 @@ export function normalizeWhatsAppPhone(raw: string): string | null {
 
   if (digits.length === 0) return null;
 
+  // Handle international exit code 00 (e.g. 00919182769155 -> 919182769155)
+  if (digits.startsWith('00')) {
+    digits = digits.substring(2);
+  }
+
   // Handle leading zero common in local Indian dialing (e.g. 09876543210)
   if (digits.startsWith('0') && digits.length === 11) {
     digits = digits.substring(1);

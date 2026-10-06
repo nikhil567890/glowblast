@@ -17,21 +17,20 @@ export class CampaignService {
     error?: { code: string; message: string };
     campaign?: StoredCampaign;
   }> {
-    const {
-      campaignId,
-      campaignName,
-      businessName,
-      templateId,
-      templateName,
-      templateLanguage = 'en_US',
-      templateVariables = [],
-      templateComponents,
-      recipients,
-      optedOutPhones = [],
-    } = req;
+    const effectiveCampaignId = req.campaignId?.trim() || `GB-${Date.now()}`;
+    const effectiveCampaignName = req.campaignName.trim();
+    const effectiveBusinessName = req.businessName?.trim() || undefined;
+    const templateId = req.templateId?.trim() || undefined;
+    const templateName = req.templateName.trim();
+    const effectiveTemplateLanguage = req.templateLanguage?.trim() || 'en_US';
+    const effectiveVariables = req.templateVariables ? [...req.templateVariables] : [];
+    const optedOutPhones = req.optedOutPhones || [];
+    const templateComponents = req.templateComponents || undefined;
+    const recipients = req.recipients;
 
     // 1. Enforce Test Mode Recipient Limit
     if (recipients.length > env.TEST_RECIPIENT_LIMIT) {
+      console.warn(`[Campaign] Rejected:\nreason=TEST_RECIPIENT_LIMIT`);
       return {
         success: false,
         error: {
@@ -42,23 +41,25 @@ export class CampaignService {
     }
 
     // 2. Duplicate send prevention / Idempotency check
-    const existing = campaignStore.get(campaignId);
+    const existing = campaignStore.get(effectiveCampaignId);
     if (existing && existing.status !== 'pending') {
+      console.warn(`[Campaign] Rejected:\nreason=DUPLICATE_CAMPAIGN`);
       return {
         success: false,
         error: {
           code: 'DUPLICATE_CAMPAIGN',
-          message: `Campaign ${campaignId} has already been submitted or processed.`,
+          message: `Campaign ${effectiveCampaignId} has already been submitted or processed.`,
         },
       };
     }
 
     // 3. Validate template and approval status
     if (!templateName || templateName.trim().length === 0) {
+      console.warn(`[Campaign] Rejected:\nreason=TEMPLATE_NOT_FOUND`);
       return {
         success: false,
         error: {
-          code: 'MISSING_TEMPLATE',
+          code: 'TEMPLATE_NOT_FOUND',
           message: 'A valid WhatsApp template must be selected.',
         },
       };
@@ -68,13 +69,13 @@ export class CampaignService {
     const template = templateStore.findByIdOrName(templateLookupKey);
 
     let effectiveMetaTemplateName = templateName.trim();
-    let effectiveTemplateLanguage = templateLanguage || 'en_US';
-    let effectiveVariables = [...templateVariables];
+    let finalTemplateLanguage = effectiveTemplateLanguage;
+    let finalVariables = [...effectiveVariables];
 
     if (template) {
       if (template.status !== 'approved') {
         console.warn(
-          `[Campaign] Blocked dispatch: template '${template.displayName}' (${template.name}) has status '${template.status}'.`
+          `[Campaign] Rejected:\nreason=TEMPLATE_NOT_APPROVED\n[Campaign] Blocked dispatch: template '${template.displayName}' (${template.name}) has status '${template.status}'.`
         );
         return {
           success: false,
@@ -85,15 +86,15 @@ export class CampaignService {
         };
       }
       effectiveMetaTemplateName = template.name;
-      effectiveTemplateLanguage = template.language || effectiveTemplateLanguage;
-      if (effectiveVariables.length === 0 && template.variables) {
-        effectiveVariables = template.variables;
+      finalTemplateLanguage = template.language || finalTemplateLanguage;
+      if (finalVariables.length === 0 && template.variables) {
+        finalVariables = template.variables;
       }
     } else {
       // If template is not in templateStore, only 'hello_world' is permitted as explicit Meta test template
       if (templateName !== 'hello_world') {
         console.warn(
-          `[Campaign] Blocked dispatch: template '${templateName}' has no valid Meta mapping in template store.`
+          `[Campaign] Rejected:\nreason=TEMPLATE_NOT_FOUND\n[Campaign] Blocked dispatch: template '${templateName}' has no valid Meta mapping in template store.`
         );
         return {
           success: false,
@@ -111,26 +112,29 @@ export class CampaignService {
     );
 
     console.log(
-      `[Campaign] Initializing campaign ${campaignId} ('${campaignName}') with ${recipients.length} recipients, Meta template='${effectiveMetaTemplateName}' (${effectiveTemplateLanguage})`
+      `[Campaign] Initializing campaign ${effectiveCampaignId} ('${effectiveCampaignName}') with ${recipients.length} recipients, Meta template='${effectiveMetaTemplateName}' (${finalTemplateLanguage})`
     );
 
     // Prepare stored messages
     const storedMessages: StoredMessage[] = [];
     const now = new Date().toISOString();
 
-    for (const r of recipients) {
-      const internalId = `${campaignId}_${r.localCustomerId}`;
+    for (let i = 0; i < recipients.length; i++) {
+      const r = recipients[i];
+      const localCustomerId = r.localCustomerId?.trim() || `cust_${i + 1}`;
+      const customerName = r.name?.trim() || 'Valued Customer';
+      const internalId = `${effectiveCampaignId}_${localCustomerId}`;
       const normalizedPhone = normalizeWhatsAppPhone(r.phone);
 
       const msg: StoredMessage = {
         id: internalId,
-        campaignId,
-        localCustomerId: r.localCustomerId,
-        recipientName: r.name,
+        campaignId: effectiveCampaignId,
+        localCustomerId,
+        recipientName: customerName,
         normalizedPhone: normalizedPhone || r.phone,
         status: 'queued',
         templateName: effectiveMetaTemplateName,
-        templateLanguage: effectiveTemplateLanguage,
+        templateLanguage: finalTemplateLanguage,
         createdAt: now,
         updatedAt: now,
       };
@@ -140,11 +144,11 @@ export class CampaignService {
     }
 
     const storedCampaign: StoredCampaign = {
-      campaignId,
-      campaignName,
+      campaignId: effectiveCampaignId,
+      campaignName: effectiveCampaignName,
       status: 'processing',
       templateName: effectiveMetaTemplateName,
-      templateLanguage: effectiveTemplateLanguage,
+      templateLanguage: finalTemplateLanguage,
       total: recipients.length,
       queued: recipients.length,
       accepted: 0,
@@ -163,11 +167,11 @@ export class CampaignService {
     // Process campaign sending asynchronously in background with controlled sequential delay
     setImmediate(() => {
       this.executeCampaignSend({
-        campaignId,
+        campaignId: effectiveCampaignId,
         templateName: effectiveMetaTemplateName,
-        templateLanguage: effectiveTemplateLanguage,
-        variables: effectiveVariables,
-        businessName,
+        templateLanguage: finalTemplateLanguage,
+        variables: finalVariables,
+        businessName: effectiveBusinessName,
         allowlist,
         optedOutSet: normalizedOptedOut,
         templateComponents,

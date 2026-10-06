@@ -25,6 +25,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool? _isBackendOnline;
   BackendHealthStatus? _lastHealthStatus;
   bool _showDiagnostics = false;
+  bool _isLoggingOut = false;
 
   @override
   void initState() {
@@ -245,28 +246,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onPressed: () => Navigator.pop(dialogCtx),
             child: const Text('Cancel'),
           ),
-          ElevatedButton(
+            ElevatedButton(
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.error,
               foregroundColor: Colors.white,
             ),
-            onPressed: () async {
-              Navigator.pop(dialogCtx);
-              // 1. Call backend logout when applicable
-              await widget.repository.backendClient.logout(
-                token: widget.repository.authToken,
-              );
-              // 2. Clear local auth session securely
-              await widget.repository.clearAuthSession();
-              // 3. Navigate to Landing Page/Login
-              if (!mounted) return;
-              Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(
-                  builder: (context) => LandingScreen(repository: widget.repository),
-                ),
-                (route) => false,
-              );
-            },
+            onPressed: _isLoggingOut
+                ? null
+                : () async {
+                    setState(() => _isLoggingOut = true);
+                    Navigator.pop(dialogCtx);
+                    try {
+                      // 1. Call backend logout once
+                      await widget.repository.backendClient.logout(
+                        token: widget.repository.authToken,
+                      );
+                      // 2. Clear local auth session securely
+                      await widget.repository.clearAuthSession();
+                      // 3. Navigate to Landing Page/Login
+                      if (!mounted) return;
+                      Navigator.of(context).pushAndRemoveUntil(
+                        MaterialPageRoute(
+                          builder: (context) => LandingScreen(repository: widget.repository),
+                        ),
+                        (route) => false,
+                      );
+                    } finally {
+                      if (mounted) setState(() => _isLoggingOut = false);
+                    }
+                  },
             child: const Text('Log Out'),
           ),
         ],

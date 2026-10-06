@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/widgets/primary_button.dart';
 import '../../../data/models/auth_user.dart';
@@ -27,7 +28,10 @@ class OtpVerificationScreen extends StatefulWidget {
 }
 
 class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
-  final TextEditingController _otpController = TextEditingController();
+  final List<TextEditingController> _digitControllers =
+      List.generate(6, (_) => TextEditingController());
+  final List<FocusNode> _focusNodes = List.generate(6, (_) => FocusNode());
+
   bool _isLoading = false;
   bool _isResending = false;
 
@@ -35,10 +39,19 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
   int _resendCooldownSeconds = 60;
   Timer? _cooldownTimer;
 
+  String get _currentOtp =>
+      _digitControllers.map((c) => c.text.trim()).join();
+
   @override
   void initState() {
     super.initState();
     _startCooldownTimer();
+    // Auto-focus first digit field after build
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _focusNodes.isNotEmpty) {
+        _focusNodes[0].requestFocus();
+      }
+    });
   }
 
   void _startCooldownTimer() {
@@ -60,12 +73,57 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
   @override
   void dispose() {
     _cooldownTimer?.cancel();
-    _otpController.dispose();
+    for (final c in _digitControllers) {
+      c.dispose();
+    }
+    for (final f in _focusNodes) {
+      f.dispose();
+    }
     super.dispose();
   }
 
+  void _onDigitChanged(int index, String value) {
+    if (value.length > 1) {
+      // User pasted full code (e.g. 6 digits)
+      final digits = value.replaceAll(RegExp(r'\D'), '');
+      for (int i = 0; i < 6 && i < digits.length; i++) {
+        _digitControllers[i].text = digits[i];
+      }
+      if (digits.length >= 6) {
+        _focusNodes[5].unfocus();
+        _handleVerify();
+      } else {
+        _focusNodes[digits.length].requestFocus();
+      }
+      return;
+    }
+
+    if (value.isNotEmpty) {
+      if (index < 5) {
+        _focusNodes[index + 1].requestFocus();
+      } else {
+        _focusNodes[index].unfocus();
+        if (_currentOtp.length == 6) {
+          _handleVerify();
+        }
+      }
+    }
+  }
+
+  KeyEventResult _handleKeyEvent(int index, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.backspace) {
+      if (_digitControllers[index].text.isEmpty && index > 0) {
+        _digitControllers[index - 1].clear();
+        _focusNodes[index - 1].requestFocus();
+        return KeyEventResult.handled;
+      }
+    }
+    return KeyEventResult.ignored;
+  }
+
   Future<void> _handleVerify() async {
-    final rawOtp = _otpController.text.trim();
+    final rawOtp = _currentOtp;
     if (rawOtp.length != 6 || !RegExp(r'^\d{6}$').hasMatch(rawOtp)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -87,7 +145,9 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
     if (!mounted) return;
     setState(() => _isLoading = false);
 
-    if (result['success'] == true) {
+    final isSuccess = result['success'] == true || result['statusCode'] == 200;
+
+    if (isSuccess) {
       final token = result['token'] as String? ?? '';
       final userData = result['user'] as Map<String, dynamic>? ?? {};
       final authUser = AuthUser.fromJson(userData);
@@ -159,13 +219,23 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
       name: widget.name,
       email: widget.email,
       password: 'TemporaryResend123!', // Kept same on backend or refreshed
+      businessName: widget.businessName,
+      phone: widget.phone,
     );
 
     if (!mounted) return;
     setState(() => _isResending = false);
 
-    if (result['success'] == true) {
+    final isSuccess = result['success'] == true || result['statusCode'] == 200;
+
+    if (isSuccess) {
       _startCooldownTimer();
+      // Clear inputs for fresh code
+      for (final c in _digitControllers) {
+        c.clear();
+      }
+      _focusNodes[0].requestFocus();
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('New verification code sent to ${widget.email}.'),
@@ -184,6 +254,52 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         ),
       );
     }
+  }
+
+  Widget _buildDigitBox(int index, bool isDark) {
+    return Focus(
+      onKeyEvent: (node, event) => _handleKeyEvent(index, event),
+      child: SizedBox(
+        width: 44,
+        height: 56,
+        child: TextFormField(
+          controller: _digitControllers[index],
+          focusNode: _focusNodes[index],
+          keyboardType: TextInputType.number,
+          textAlign: TextAlign.center,
+          maxLength: 1,
+          style: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w800,
+            fontFamily: 'monospace',
+            color: isDark ? AppColors.textLight : AppColors.textCharcoal,
+          ),
+          decoration: InputDecoration(
+            counterText: '',
+            filled: true,
+            fillColor: isDark ? AppColors.surfaceDark : AppColors.warmCream,
+            contentPadding: EdgeInsets.zero,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(
+                color: isDark ? AppColors.borderDark : AppColors.borderLight,
+              ),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide(
+                color: isDark ? AppColors.borderDark : AppColors.borderLight,
+              ),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: AppColors.accentGold, width: 2),
+            ),
+          ),
+          onChanged: (val) => _onDigitChanged(index, val),
+        ),
+      ),
+    );
   }
 
   @override
@@ -270,7 +386,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
 
                 // Card Container
                 Container(
-                  padding: const EdgeInsets.all(24),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
                   decoration: BoxDecoration(
                     color: isDark ? AppColors.cardDark : Colors.white,
                     borderRadius: BorderRadius.circular(20),
@@ -291,46 +407,15 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
                         'Enter 6-Digit Code',
                         style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 20),
 
-                      // Code Input Field
-                      TextField(
-                        controller: _otpController,
-                        keyboardType: TextInputType.number,
-                        maxLength: 6,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          fontSize: 28,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 12,
-                          fontFamily: 'monospace',
-                        ),
-                        decoration: InputDecoration(
-                          counterText: '',
-                          hintText: '000000',
-                          hintStyle: TextStyle(
-                            fontSize: 28,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 12,
-                            color: isDark ? Colors.white24 : Colors.black12,
-                          ),
-                          filled: true,
-                          fillColor: isDark ? AppColors.surfaceDark : AppColors.warmCream,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(
-                              color: isDark ? AppColors.borderDark : AppColors.borderLight,
-                            ),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: const BorderSide(color: AppColors.primarySage, width: 2),
-                          ),
-                        ),
-                        onSubmitted: (_) => _handleVerify(),
+                      // 6 Individual Digit Cells with Auto Advance & Backspace Handling
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: List.generate(6, (i) => _buildDigitBox(i, isDark)),
                       ),
 
-                      const SizedBox(height: 14),
+                      const SizedBox(height: 16),
 
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,

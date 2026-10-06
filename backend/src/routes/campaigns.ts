@@ -1,4 +1,6 @@
 import { Router, Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
+import { env } from '../config/env';
 import { campaignSendSchema } from '../utils/validation';
 import { CampaignService } from '../services/campaignService';
 import { campaignStore } from '../store/campaignStore';
@@ -9,27 +11,99 @@ const router = Router();
 /**
  * POST /api/campaigns/send
  * Dispatches a WhatsApp campaign (max 5 recipients in test mode).
+ * Requires JWT authentication via Authorization: Bearer <JWT>
  */
 router.post('/send', async (req: Request, res: Response) => {
-  const parsed = campaignSendSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({
+  // 1. Verify JWT Authentication
+  const authHeader = req.headers.authorization;
+  const authHeaderPresent = !!(authHeader && authHeader.startsWith('Bearer '));
+  let authValid = false;
+  let userId = 'unauthenticated';
+
+  if (authHeaderPresent && authHeader) {
+    const token = authHeader.substring(7).trim();
+    try {
+      const decoded = jwt.verify(token, env.JWT_SECRET) as { sub?: string; email?: string; id?: string };
+      authValid = true;
+      userId = decoded.sub || decoded.id || decoded.email || 'authenticated_user';
+    } catch (_) {
+      authValid = false;
+    }
+  }
+
+  // Safe diagnostics (never logs secrets, JWT, tokens, or PII)
+  console.log(`[Campaign] Send request received\nauthHeaderPresent=${authHeaderPresent}\nauthValid=${authValid}\nuserId=${userId}`);
+
+  if (!authHeaderPresent || !authValid) {
+    console.warn(`[Campaign] Rejected:\nreason=UNAUTHORIZED`);
+    res.status(401).json({
       success: false,
       error: {
-        code: 'VALIDATION_ERROR',
-        message: 'Invalid campaign payload format',
-        details: parsed.error.format(),
+        code: 'UNAUTHORIZED',
+        message: 'Authentication required',
       },
     });
     return;
   }
 
-  const result = await CampaignService.dispatchCampaign(parsed.data);
+  // 2. Safe Payload Metadata Logging
+  const payloadKeys = req.body && typeof req.body === 'object' ? Object.keys(req.body) : [];
+  const recipientsCount = Array.isArray(req.body?.recipients) ? req.body.recipients.length : 0;
+  const reqTemplateName = typeof req.body?.templateName === 'string' ? req.body.templateName : 'unknown';
+  const reqTemplateLanguage = typeof req.body?.templateLanguage === 'string' ? req.body.templateLanguage : 'en_US';
 
-  if (!result.success) {
+  console.log(
+    `[Campaign] Send request received\n` +
+    `payloadKeys=${JSON.stringify(payloadKeys)}\n` +
+    `recipientsCount=${recipientsCount}\n` +
+    `templateName=${reqTemplateName}\n` +
+    `templateLanguage=${reqTemplateLanguage}`
+  );
+
+  // 3. Schema Validation
+  const parsed = campaignSendSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const issues = parsed.error.issues;
+    const errorFields = Array.from(new Set(issues.map((i) => i.path.join('.') || 'body')));
+    const firstMessage = issues[0]?.message || 'Invalid campaign payload format';
+
+    console.warn(`[Campaign] Rejected:\nreason=VALIDATION_ERROR\nfields=${JSON.stringify(errorFields)}`);
     res.status(400).json({
       success: false,
-      error: result.error,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: firstMessage !== 'Required' && !firstMessage.startsWith('Expected')
+          ? firstMessage
+          : `Invalid campaign data: ${errorFields.join(', ')}`,
+        fields: errorFields,
+      },
+    });
+    return;
+  }
+
+  // 4. Dispatch Campaign
+  const result = await CampaignService.dispatchCampaign({
+    ...parsed.data,
+    campaignId: parsed.data.campaignId || `GB-${Date.now()}`,
+    templateLanguage: parsed.data.templateLanguage || 'en_US',
+    templateComponents: (parsed.data.templateComponents ?? undefined) as any,
+    recipients: parsed.data.recipients.map((r, idx) => ({
+      localCustomerId: r.localCustomerId || `cust_${idx + 1}`,
+      name: r.name || 'Valued Customer',
+      phone: r.phone,
+    })),
+  });
+
+  if (!result.success) {
+    const errCode = result.error?.code || 'DISPATCH_ERROR';
+    console.warn(`[Campaign] Rejected:\nreason=${errCode}`);
+    const statusCode = errCode === 'CAMPAIGN_NOT_FOUND' ? 404 : 400;
+    res.status(statusCode).json({
+      success: false,
+      error: {
+        code: errCode,
+        message: result.error?.message || 'Failed to dispatch campaign',
+      },
     });
     return;
   }

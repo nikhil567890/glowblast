@@ -78,7 +78,69 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
 
     final campaignId = 'GB-${DateTime.now().millisecondsSinceEpoch}';
 
-    // Connect to real-time SSE event stream
+    // Convert eligible customers to backend payload
+    final recipientsPayload = eligible.map((c) {
+      return {
+        'localCustomerId': c.id,
+        'name': c.name,
+        'phone': c.phone,
+      };
+    }).toList();
+
+    // 1. Call backend send endpoint first with selected template and active JWT
+    final sendResult = await widget.repository.backendClient.sendCampaign(
+      campaignId: campaignId,
+      campaignName: widget.campaignName,
+      businessName: widget.repository.settings.businessName,
+      templateId: widget.templateId,
+      templateName: widget.templateName,
+      templateLanguage: widget.templateLanguage,
+      templateVariables: widget.templateVariables,
+      recipients: recipientsPayload,
+      optedOutPhones: widget.repository.optedOutCustomers.map((c) => c.phone).toList(),
+      token: widget.repository.authToken,
+    );
+
+    if (!mounted) return;
+
+    if (sendResult['success'] != true) {
+      final statusCode = sendResult['statusCode'] as int?;
+      final err = sendResult['error'];
+      String msg = 'Failed to submit campaign to backend.';
+
+      if (statusCode == 401 || (err is Map && err['code'] == 'UNAUTHORIZED')) {
+        msg = 'Authentication required. Please sign in again.';
+      } else if (statusCode == 403 || (err is Map && err['code'] == 'FORBIDDEN')) {
+        msg = 'You are not authorized to send this campaign.';
+      } else if (statusCode == 404 || (err is Map && err['code'] == 'NOT_FOUND')) {
+        msg = 'Campaign service endpoint not found.';
+      } else if (statusCode != null && statusCode >= 500) {
+        msg = 'Campaign service temporarily unavailable. Please try again.';
+      } else if (err is Map) {
+        final code = err['code'];
+        final errText = err['message'] ?? err['title'];
+        final fields = err['fields'];
+        if (code == 131031 || code == '131031') {
+          msg = 'WhatsApp Business Account is restricted. Meta rejected this message.';
+        } else if (code == 'TEST_RECIPIENT_LIMIT') {
+          msg = errText ?? 'WhatsApp Test Mode allows up to 5 authorized recipients.';
+        } else if (code == 'TEMPLATE_NOT_APPROVED') {
+          msg = errText ?? 'This GlowBlast template is not connected to an approved WhatsApp template yet.';
+        } else if (code == 'VALIDATION_ERROR' && fields is List && fields.isNotEmpty) {
+          msg = 'Invalid campaign data: ${fields.join(', ')}';
+        } else {
+          msg = errText ?? msg;
+        }
+      }
+
+      setState(() {
+        _hasError = true;
+        _errorMessage = msg;
+      });
+      return;
+    }
+
+    // 2. Connect to real-time SSE event stream only after backend accepts campaign
     try {
       _sseSubscription = widget.repository.backendClient
           .connectToCampaignEvents(campaignId)
@@ -116,51 +178,6 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
       });
     } catch (_) {
       // SSE connection error; polling fallback available
-    }
-
-    // Convert eligible customers to backend payload
-    final recipientsPayload = eligible.map((c) {
-      return {
-        'localCustomerId': c.id,
-        'name': c.name,
-        'phone': c.phone,
-      };
-    }).toList();
-
-    // Call backend send endpoint with selected template
-    final sendResult = await widget.repository.backendClient.sendCampaign(
-      campaignId: campaignId,
-      campaignName: widget.campaignName,
-      businessName: widget.repository.settings.businessName,
-      templateId: widget.templateId,
-      templateName: widget.templateName,
-      templateLanguage: widget.templateLanguage,
-      templateVariables: widget.templateVariables,
-      recipients: recipientsPayload,
-      optedOutPhones: widget.repository.optedOutCustomers.map((c) => c.phone).toList(),
-    );
-
-    if (!mounted) return;
-
-    if (sendResult['success'] != true) {
-      final err = sendResult['error'];
-      String msg = 'Failed to submit campaign to backend.';
-      if (err is Map) {
-        final code = err['code'];
-        final errText = err['message'] ?? err['title'];
-        if (code == 131031 || code == '131031') {
-          msg = 'WhatsApp Business Account is restricted. Meta rejected this message.';
-        } else if (code == 'TEST_RECIPIENT_LIMIT') {
-          msg = errText ?? 'WhatsApp Test Mode allows up to 5 authorized recipients.';
-        } else {
-          msg = errText ?? msg;
-        }
-      }
-      setState(() {
-        _hasError = true;
-        _errorMessage = msg;
-      });
-      return;
     }
 
     // Wait for dispatch execution to complete

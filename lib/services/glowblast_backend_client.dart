@@ -67,10 +67,12 @@ class BackendWhatsAppStatus {
 class GlowBlastBackendClient {
   final String baseUrl;
   final http.Client _httpClient;
+  String? authToken;
 
   GlowBlastBackendClient({
     required String baseUrl,
     http.Client? httpClient,
+    this.authToken,
   })  : baseUrl = ApiConstants.normalizeBackendUrl(baseUrl),
         _httpClient = httpClient ?? http.Client();
 
@@ -213,39 +215,63 @@ class GlowBlastBackendClient {
     required List<Map<String, String>> recipients,
     List<String> optedOutPhones = const [],
     Map<String, dynamic>? metadata,
+    String? token,
   }) async {
-    final body = jsonEncode({
+    final payload = <String, dynamic>{
       'campaignId': campaignId,
       'campaignName': campaignName,
-      'businessName': businessName,
-      'templateId': templateId,
       'templateName': templateName,
       'templateLanguage': templateLanguage,
-      'templateVariables': templateVariables,
-      ...?templateComponents == null ? null : {'templateComponents': templateComponents},
       'recipients': recipients,
       'optedOutPhones': optedOutPhones,
-      'metadata': metadata,
-    });
+    };
+    if (businessName != null && businessName.trim().isNotEmpty) {
+      payload['businessName'] = businessName.trim();
+    }
+    if (templateId != null && templateId.trim().isNotEmpty) {
+      payload['templateId'] = templateId.trim();
+    }
+    if (templateVariables != null) {
+      payload['templateVariables'] = templateVariables;
+    }
+    if (templateComponents != null) {
+      payload['templateComponents'] = templateComponents;
+    }
+    if (metadata != null) {
+      payload['metadata'] = metadata;
+    }
+
+    final effectiveToken = token ?? authToken;
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
+        'Authorization': 'Bearer ${effectiveToken.trim()}',
+    };
 
     try {
       final response = await _httpClient
           .post(
             _uri('/api/campaigns/send'),
-            headers: {'Content-Type': 'application/json'},
-            body: body,
+            headers: headers,
+            body: jsonEncode(payload),
           )
           .timeout(const Duration(seconds: 15));
 
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      Map<String, dynamic> data = {};
+      try {
+        data = jsonDecode(response.body) as Map<String, dynamic>;
+      } catch (_) {}
+
+      final isSuccess = response.statusCode == 202 || response.statusCode == 200;
       return {
-        'success': response.statusCode == 202 || response.statusCode == 200,
+        'success': isSuccess,
         'statusCode': response.statusCode,
         ...data,
       };
     } catch (e) {
       return {
         'success': false,
+        'statusCode': 0,
         'error': {
           'code': 'NETWORK_ERROR',
           'message': 'Could not connect to GlowBlast backend: $e',

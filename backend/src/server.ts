@@ -13,6 +13,9 @@ import authRouter from './routes/auth';
 
 export const app = express();
 
+// Trust reverse proxy (Render) so express-rate-limit correctly resolves client IP
+app.set('trust proxy', 1);
+
 // Security Middlewares
 app.use(helmet());
 
@@ -83,7 +86,8 @@ app.use((_req, res) => {
 });
 
 // Start server when run directly
-if (process.env.NODE_ENV !== 'test') {
+const isTestEnv = process.env.NODE_ENV === 'test' || process.execArgv.includes('--test') || process.argv.some(a => a.includes('test'));
+if (!isTestEnv) {
   const server = app.listen(env.PORT, () => {
     console.log('====================================================');
     console.log(` GlowBlast WhatsApp Backend running on port ${env.PORT}`);

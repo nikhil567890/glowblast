@@ -10,13 +10,13 @@ export type CampaignStatus =
   | 'cancelled';
 
 export interface CampaignSendRequest {
-  campaignId: string;
-  businessName?: string;
+  campaignId?: string | null;
+  businessName?: string | null;
   campaignName: string;
-  templateId?: string;
+  templateId?: string | null;
   templateName: string;
-  templateLanguage: string;
-  templateVariables?: string[];
+  templateLanguage?: string | null;
+  templateVariables?: string[] | null;
   templateComponents?: Array<{
     type: string;
     parameters: Array<{
@@ -24,14 +24,14 @@ export interface CampaignSendRequest {
       text?: string;
       [key: string]: any;
     }>;
-  }>;
+  }> | null;
   recipients: Array<{
-    localCustomerId: string;
-    name: string;
+    localCustomerId?: string | null;
+    name?: string | null;
     phone: string;
   }>;
-  optedOutPhones?: string[];
-  metadata?: Record<string, any>;
+  optedOutPhones?: string[] | null;
+  metadata?: Record<string, any> | null;
 }
 
 export interface CampaignSummary {

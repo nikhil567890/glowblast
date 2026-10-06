@@ -61,7 +61,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
     if (!mounted) return;
     setState(() => _isLoading = false);
 
-    if (result['success'] == true) {
+    final isSuccess = result['success'] == true || result['statusCode'] == 200;
+
+    if (isSuccess) {
+      if (!mounted) return;
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -85,22 +89,57 @@ class _RegisterScreenState extends State<RegisterScreen> {
       );
     } else {
       final errorMap = result['error'] as Map<String, dynamic>?;
+      final errorCode = errorMap?['code'] as String? ?? '';
       final errorMsg = errorMap?['message'] as String? ??
           'Unable to send verification email. Please try again.';
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Row(
-            children: [
-              const Icon(Icons.error_outline_rounded, color: Colors.white, size: 18),
-              const SizedBox(width: 8),
-              Expanded(child: Text(errorMsg)),
-            ],
+      if (errorCode == 'COOLDOWN_ACTIVE') {
+        // A code was already dispatched recently to this email
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.info_outline_rounded, color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Expanded(child: Text(errorMsg)),
+              ],
+            ),
+            backgroundColor: AppColors.primarySageDark,
+            behavior: SnackBarBehavior.floating,
+            action: SnackBarAction(
+              label: 'Enter Code',
+              textColor: AppColors.accentGoldLight,
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (context) => OtpVerificationScreen(
+                      repository: widget.repository,
+                      email: email,
+                      name: name,
+                      businessName: businessName.isNotEmpty ? businessName : null,
+                      phone: phone.isNotEmpty ? phone : null,
+                    ),
+                  ),
+                );
+              },
+            ),
           ),
-          backgroundColor: AppColors.error,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.error_outline_rounded, color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Expanded(child: Text(errorMsg)),
+              ],
+            ),
+            backgroundColor: AppColors.error,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     }
   }
 

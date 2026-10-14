@@ -16,6 +16,7 @@ class Campaign {
   final String status; // 'Sent', 'Scheduled', 'Accepted', 'Completed', 'Completed with Errors', 'Failed'
   final DateTime? scheduledDate;
   final bool isRealTest; // True if sent through real Meta WhatsApp Cloud API backend
+  final String mode; // 'demo' | 'test' | 'production'
   final String? backendCampaignId;
   final String? templateName;
 
@@ -37,9 +38,12 @@ class Campaign {
     this.status = 'Sent',
     this.scheduledDate,
     this.isRealTest = false,
+    String? mode,
     this.backendCampaignId,
     this.templateName,
-  });
+  }) : mode = mode ?? (isRealTest ? 'test' : 'demo');
+
+  bool get isProduction => mode == 'production';
 
   double get deliveryRate {
     final base = messagesSent > 0 ? messagesSent : (accepted > 0 ? accepted : 0);
@@ -67,6 +71,7 @@ class Campaign {
     'status': status,
     'scheduledDate': scheduledDate?.toIso8601String(),
     'isRealTest': isRealTest,
+    'mode': mode,
     'backendCampaignId': backendCampaignId,
     'templateName': templateName,
   };
@@ -91,6 +96,7 @@ class Campaign {
       status: json['status'] as String? ?? 'Sent',
       scheduledDate: json['scheduledDate'] != null ? DateTime.tryParse(json['scheduledDate'] as String) : null,
       isRealTest: json['isRealTest'] as bool? ?? false,
+      mode: json['mode'] as String?,
       backendCampaignId: json['backendCampaignId'] as String?,
       templateName: json['templateName'] as String?,
     );

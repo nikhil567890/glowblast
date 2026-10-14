@@ -1,10 +1,10 @@
-import fs from 'fs';
-import path from 'path';
+import { getPool } from '../db/pool';
 import { StoredMessage, MessageStatus } from '../types/message';
 
 const STATUS_PRECEDENCE: Record<MessageStatus, number> = {
   queued: 0,
   sending: 1,
+  uncertain_timeout: 1,
   accepted: 2,
   sent: 3,
   delivered: 4,
@@ -13,136 +13,263 @@ const STATUS_PRECEDENCE: Record<MessageStatus, number> = {
   excluded_opt_out: 10,
 };
 
-class MessageStore {
-  private messages = new Map<string, StoredMessage>(); // key: internalId (e.g. campaignId_localCustomerId)
-  private providerIdIndex = new Map<string, string>(); // providerMessageId -> internalId
-  private storageFile: string;
+export class MessageStore {
+  /**
+   * Fetches a message by its internal ID (e.g. campaignId_localCustomerId) from PostgreSQL.
+   */
+  public async get(id: string): Promise<StoredMessage | undefined> {
+    const pool = getPool();
+    const res = await pool.query<{
+      id: string;
+      campaign_id: string;
+      local_customer_id: string;
+      recipient_name: string;
+      normalized_phone: string;
+      status: string;
+      provider_message_id: string | null;
+      template_name: string | null;
+      template_language: string | null;
+      error_code: number | null;
+      error_title: string | null;
+      error_message: string | null;
+      error_details: string | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+              provider_message_id, template_name, template_language,
+              error_code, error_title, error_message, error_details, created_at, updated_at
+       FROM campaign_messages
+       WHERE id = $1
+       LIMIT 1;`,
+      [id]
+    );
 
-  constructor() {
-    const dataDir = path.join(process.cwd(), 'data');
-    if (!fs.existsSync(dataDir)) {
-      try {
-        fs.mkdirSync(dataDir, { recursive: true });
-      } catch {
-        // Fallback for readonly filesystem in tests
-      }
-    }
-    this.storageFile = path.join(dataDir, 'messages.json');
-    this.loadFromDisk();
+    if (res.rows.length === 0) return undefined;
+    return this.mapRowToMessage(res.rows[0]);
   }
 
-  private loadFromDisk() {
-    try {
-      if (fs.existsSync(this.storageFile)) {
-        const raw = fs.readFileSync(this.storageFile, 'utf8');
-        const list: StoredMessage[] = JSON.parse(raw);
-        for (const msg of list) {
-          this.messages.set(msg.id, msg);
-          if (msg.providerMessageId) {
-            this.providerIdIndex.set(msg.providerMessageId, msg.id);
-          }
-        }
-      }
-    } catch {
-      // Ignore initial file read errors
-    }
+  /**
+   * Fetches a message by Meta's providerMessageId (wamid).
+   */
+  public async getByProviderId(providerMessageId: string): Promise<StoredMessage | undefined> {
+    const pool = getPool();
+    const res = await pool.query(
+      `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+              provider_message_id, template_name, template_language,
+              error_code, error_title, error_message, error_details, created_at, updated_at
+       FROM campaign_messages
+       WHERE provider_message_id = $1
+       LIMIT 1;`,
+      [providerMessageId]
+    );
+
+    if (res.rows.length === 0) return undefined;
+    return this.mapRowToMessage(res.rows[0]);
   }
 
-  private saveToDisk() {
-    try {
-      const list = Array.from(this.messages.values());
-      fs.writeFileSync(this.storageFile, JSON.stringify(list, null, 2), 'utf8');
-    } catch {
-      // Ignore disk persistence errors in tests
-    }
+  /**
+   * Fetches all messages for a campaign from PostgreSQL.
+   */
+  public async getByCampaignId(campaignId: string): Promise<StoredMessage[]> {
+    const pool = getPool();
+    const res = await pool.query(
+      `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+              provider_message_id, template_name, template_language,
+              error_code, error_title, error_message, error_details, created_at, updated_at
+       FROM campaign_messages
+       WHERE campaign_id = $1
+       ORDER BY created_at ASC;`,
+      [campaignId]
+    );
+
+    return res.rows.map((r) => this.mapRowToMessage(r));
   }
 
-  public get(id: string): StoredMessage | undefined {
-    return this.messages.get(id);
+  /**
+   * Atomically claims a queued message for dispatch.
+   * Ensures that concurrent workers or HTTP handlers cannot dispatch the same message twice.
+   * Returns the message if successfully claimed, or null if already claimed/sent.
+   */
+  public async claimQueuedMessage(id: string): Promise<StoredMessage | null> {
+    const pool = getPool();
+    const res = await pool.query(
+      `UPDATE campaign_messages
+       SET status = 'sending', updated_at = NOW()
+       WHERE id = $1 AND status = 'queued'
+       RETURNING id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                 provider_message_id, template_name, template_language,
+                 error_code, error_title, error_message, error_details, created_at, updated_at;`,
+      [id]
+    );
+
+    if (res.rows.length === 0) return null;
+    return this.mapRowToMessage(res.rows[0]);
   }
 
-  public getByProviderId(providerMessageId: string): StoredMessage | undefined {
-    const internalId = this.providerIdIndex.get(providerMessageId);
-    if (!internalId) return undefined;
-    return this.messages.get(internalId);
-  }
+  /**
+   * Upserts a message into PostgreSQL.
+   */
+  public async upsert(msg: StoredMessage): Promise<StoredMessage> {
+    const pool = getPool();
+    // Ensure parent campaign exists (for standalone message tests or out-of-order writes)
+    await pool.query(
+      `INSERT INTO campaigns (campaign_id, campaign_name, mode, status, template_name)
+       VALUES ($1, 'Auto-created Campaign', 'test', 'processing', 'default')
+       ON CONFLICT (campaign_id) DO NOTHING;`,
+      [msg.campaignId]
+    );
 
-  public getByCampaignId(campaignId: string): StoredMessage[] {
-    return Array.from(this.messages.values()).filter((m) => m.campaignId === campaignId);
-  }
+    const res = await pool.query(
+      `INSERT INTO campaign_messages (
+        id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+        provider_message_id, template_name, template_language,
+        error_code, error_title, error_message, error_details, created_at, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+      ON CONFLICT (id) DO UPDATE SET
+        status = EXCLUDED.status,
+        provider_message_id = COALESCE(EXCLUDED.provider_message_id, campaign_messages.provider_message_id),
+        template_name = COALESCE(EXCLUDED.template_name, campaign_messages.template_name),
+        template_language = COALESCE(EXCLUDED.template_language, campaign_messages.template_language),
+        error_code = COALESCE(EXCLUDED.error_code, campaign_messages.error_code),
+        error_title = COALESCE(EXCLUDED.error_title, campaign_messages.error_title),
+        error_message = COALESCE(EXCLUDED.error_message, campaign_messages.error_message),
+        error_details = COALESCE(EXCLUDED.error_details, campaign_messages.error_details),
+        updated_at = NOW()
+      RETURNING id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                provider_message_id, template_name, template_language,
+                error_code, error_title, error_message, error_details, created_at, updated_at;`,
+      [
+        msg.id,
+        msg.campaignId,
+        msg.localCustomerId,
+        msg.recipientName,
+        msg.normalizedPhone,
+        msg.status,
+        msg.providerMessageId || null,
+        msg.templateName || null,
+        msg.templateLanguage || null,
+        msg.errorCode || null,
+        msg.errorTitle || null,
+        msg.errorMessage || null,
+        msg.errorDetails || null,
+        msg.createdAt ? new Date(msg.createdAt) : new Date(),
+      ]
+    );
 
-  public upsert(msg: StoredMessage): StoredMessage {
-    const existing = this.messages.get(msg.id);
-    const updated: StoredMessage = {
-      ...existing,
-      ...msg,
-      updatedAt: new Date().toISOString(),
-    };
-    this.messages.set(msg.id, updated);
-    if (updated.providerMessageId) {
-      this.providerIdIndex.set(updated.providerMessageId, updated.id);
-    }
-    this.saveToDisk();
-    return updated;
+    return this.mapRowToMessage(res.rows[0]);
   }
 
   /**
    * Updates message status enforcing monotonic progression.
-   * A higher status (e.g. read, delivered) will never be overwritten by a lower status (e.g. sent, accepted).
+   * Prevents delayed webhooks from downgrading a higher status (e.g. read cannot revert to delivered).
+   * Supports 'uncertain_timeout' status.
    */
-  public updateStatus(
+  public async updateStatus(
     id: string,
     status: MessageStatus,
     providerMessageId?: string,
     error?: { code?: number; title?: string; message?: string; details?: string }
-  ): StoredMessage | undefined {
-    const msg = this.messages.get(id);
-    if (!msg) return undefined;
+  ): Promise<StoredMessage | undefined> {
+    const pool = getPool();
 
-    const currentWeight = STATUS_PRECEDENCE[msg.status] ?? 0;
+    const currentMsg = await this.get(id);
+    if (!currentMsg) return undefined;
+
+    const currentWeight = STATUS_PRECEDENCE[currentMsg.status] ?? 0;
     const newWeight = STATUS_PRECEDENCE[status] ?? 0;
 
-    // Enforce monotonic progression: do not overwrite a higher status with an earlier status
-    // Exception: transition to failed or excluded_opt_out is always allowed unless already failed/excluded
     const isTerminal = status === 'failed' || status === 'excluded_opt_out';
-    const isCurrentTerminal = msg.status === 'failed' || msg.status === 'excluded_opt_out';
+    const isCurrentTerminal = currentMsg.status === 'failed' || currentMsg.status === 'excluded_opt_out';
 
-    if (isCurrentTerminal) {
-      // Once failed or excluded, ignore earlier status webhooks
-      if (!isTerminal) {
-        console.log(`[MessageStore] Ignoring status '${status}' for terminal message ${id} (${msg.status})`);
-      }
-    } else if (newWeight >= currentWeight || isTerminal) {
-      msg.status = status;
-    } else {
-      console.log(
-        `[MessageStore] Preserving higher status '${msg.status}' over incoming earlier status '${status}' for ${id}`
-      );
+    if (isCurrentTerminal && !isTerminal) {
+      console.log(`[MessageStore] Preserving terminal status '${currentMsg.status}' for ${id}`);
+      return currentMsg;
     }
 
-    if (providerMessageId) {
-      msg.providerMessageId = providerMessageId;
-      this.providerIdIndex.set(providerMessageId, msg.id);
+    if (newWeight < currentWeight && !isTerminal) {
+      console.log(`[MessageStore] Preserving higher status '${currentMsg.status}' over '${status}' for ${id}`);
+      return currentMsg;
     }
-    if (error) {
-      msg.errorCode = error.code;
-      msg.errorTitle = error.title;
-      msg.errorMessage = error.message;
-      if (error.details) {
-        msg.errorDetails = error.details;
-      }
-    }
-    msg.updatedAt = new Date().toISOString();
-    this.saveToDisk();
-    return msg;
+
+    const res = await pool.query(
+      `UPDATE campaign_messages
+       SET status = $2,
+           provider_message_id = COALESCE($3, provider_message_id),
+           error_code = COALESCE($4, error_code),
+           error_title = COALESCE($5, error_title),
+           error_message = COALESCE($6, error_message),
+           error_details = COALESCE($7, error_details),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                 provider_message_id, template_name, template_language,
+                 error_code, error_title, error_message, error_details, created_at, updated_at;`,
+      [
+        id,
+        status,
+        providerMessageId || null,
+        error?.code || null,
+        error?.title || null,
+        error?.message || null,
+        error?.details || null,
+      ]
+    );
+
+    if (res.rows.length === 0) return undefined;
+    return this.mapRowToMessage(res.rows[0]);
   }
 
-  public clear(): void {
-    this.messages.clear();
-    this.providerIdIndex.clear();
-    this.saveToDisk();
+  /**
+   * Reconciles messages that were in flight ('sending') during a crash or restart.
+   * Transitions them to 'uncertain_timeout' after thresholdMinutes (default 5 min).
+   * They will NOT be automatically resent.
+   */
+  public async reconcileInFlightMessages(thresholdMinutes: number = 5): Promise<number> {
+    const pool = getPool();
+    const res = await pool.query(
+      `UPDATE campaign_messages
+       SET status = 'uncertain_timeout',
+           error_code = 504,
+           error_title = 'Worker Crash Recovery',
+           error_message = 'Process terminated while send was in-flight. Automatic resend prohibited.',
+           updated_at = NOW()
+       WHERE status = 'sending' AND updated_at < NOW() - ($1 || ' minutes')::interval
+       RETURNING id;`,
+      [thresholdMinutes]
+    );
+
+    return res.rowCount || 0;
+  }
+
+  /**
+   * Clears messages table (used strictly in test fixtures).
+   */
+  public async clear(): Promise<void> {
+    const pool = getPool();
+    await pool.query('DELETE FROM campaign_messages;');
+  }
+
+  private mapRowToMessage(row: any): StoredMessage {
+    return {
+      id: row.id,
+      campaignId: row.campaign_id,
+      localCustomerId: row.local_customer_id,
+      recipientName: row.recipient_name,
+      normalizedPhone: row.normalized_phone,
+      status: row.status as MessageStatus,
+      providerMessageId: row.provider_message_id || undefined,
+      templateName: row.template_name || undefined,
+      templateLanguage: row.template_language || undefined,
+      errorCode: row.error_code ?? undefined,
+      errorTitle: row.error_title || undefined,
+      errorMessage: row.error_message || undefined,
+      errorDetails: row.error_details || undefined,
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+      updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+    };
   }
 }
 
 export const messageStore = new MessageStore();
-

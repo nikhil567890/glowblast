@@ -531,15 +531,22 @@ class AppRepository extends ChangeNotifier {
     await prefs.setString(_keyTemplates, jsonEncode(_templates.map((t) => t.toJson()).toList()));
   }
 
-  Future<int> syncTemplatesWithBackend() async {
+  Future<int> syncTemplatesWithBackend({String? mode}) async {
+    final effectiveMode = mode ?? (_settings.isWhatsAppProductionMode ? 'production' : 'test');
     try {
-      final backendTemplates = await backendClient.getTemplates();
+      // 1. Trigger sync from Meta for the active mode
+      await backendClient.syncTemplates(mode: effectiveMode);
+
+      // 2. Fetch list for this mode from backend
+      final backendTemplates = await backendClient.getTemplates(mode: effectiveMode);
       if (backendTemplates.isEmpty) return 0;
 
       int updatedCount = 0;
       for (final raw in backendTemplates) {
         final tpl = WhatsAppTemplate.fromJson(raw);
-        final idx = _templates.indexWhere((t) => t.name.toLowerCase() == tpl.name.toLowerCase());
+        final idx = _templates.indexWhere(
+          (t) => (t.id == tpl.id) || (t.name.toLowerCase() == tpl.name.toLowerCase() && t.mode == tpl.mode),
+        );
         if (idx != -1) {
           _templates[idx] = tpl;
         } else {

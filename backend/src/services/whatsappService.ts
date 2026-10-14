@@ -11,20 +11,29 @@ export interface WhatsAppSendResult {
   errorTitle?: string;
   errorMessage?: string;
   errorDetails?: string;
+  isAmbiguousTimeout?: boolean;
   requestedTemplateName?: string;
   requestedTemplateLanguage?: string;
+}
+
+export interface WhatsAppCredentials {
+  phoneNumberId: string;
+  accessToken: string;
 }
 
 export class WhatsAppService {
   /**
    * Validates if Meta credentials are fully configured.
    */
-  public static validateConfiguration(): { valid: boolean; reason?: string } {
-    if (!env.WHATSAPP_PHONE_NUMBER_ID) {
-      return { valid: false, reason: 'WHATSAPP_PHONE_NUMBER_ID is not configured in backend environment.' };
+  public static validateConfiguration(customCreds?: WhatsAppCredentials): { valid: boolean; reason?: string } {
+    const phoneId = customCreds?.phoneNumberId || env.WHATSAPP_PHONE_NUMBER_ID;
+    const token = customCreds?.accessToken || env.WHATSAPP_ACCESS_TOKEN;
+
+    if (!phoneId) {
+      return { valid: false, reason: 'Target WhatsApp Phone Number ID is not configured.' };
     }
-    if (!env.WHATSAPP_ACCESS_TOKEN) {
-      return { valid: false, reason: 'WHATSAPP_ACCESS_TOKEN is not configured in backend environment.' };
+    if (!token) {
+      return { valid: false, reason: 'Target WhatsApp Access Token is not configured.' };
     }
     return { valid: true };
   }
@@ -46,8 +55,10 @@ export class WhatsAppService {
         [key: string]: any;
       }>;
     }>;
+    bizOpaqueCallbackData?: string;
+    credentials?: WhatsAppCredentials;
   }): Promise<WhatsAppSendResult> {
-    const configCheck = this.validateConfiguration();
+    const configCheck = this.validateConfiguration(params.credentials);
     if (!configCheck.valid) {
       console.warn(`[WhatsApp] Configuration missing: ${configCheck.reason}`);
       return {
@@ -66,7 +77,12 @@ export class WhatsAppService {
       templateName,
       templateLanguage = 'en_US',
       templateComponents,
+      bizOpaqueCallbackData,
+      credentials,
     } = params;
+
+    const effectivePhoneId = credentials?.phoneNumberId || env.WHATSAPP_PHONE_NUMBER_ID;
+    const effectiveToken = credentials?.accessToken || env.WHATSAPP_ACCESS_TOKEN;
 
     if (!templateName || templateName.trim().length === 0) {
       return {
@@ -81,10 +97,10 @@ export class WhatsAppService {
 
     const masked = maskPhone(recipientPhone);
     console.log(
-      `[WhatsApp] Template selected:\nname=${templateName}\nlanguage=${templateLanguage}\nrecipient=${masked}`
+      `[WhatsApp] Template selected:\nname=${templateName}\nlanguage=${templateLanguage}\nrecipient=${masked}\nphoneId=${effectivePhoneId}`
     );
 
-    const url = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}/${env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
+    const url = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}/${effectivePhoneId}/messages`;
 
     const payload: Record<string, any> = {
       messaging_product: 'whatsapp',
@@ -99,6 +115,10 @@ export class WhatsAppService {
       },
     };
 
+    if (bizOpaqueCallbackData) {
+      payload.biz_opaque_callback_data = bizOpaqueCallbackData;
+    }
+
     if (templateComponents && templateComponents.length > 0) {
       payload.template.components = templateComponents;
     }
@@ -107,7 +127,7 @@ export class WhatsAppService {
       const response = await fetch(url, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}`,
+          Authorization: `Bearer ${effectiveToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -201,14 +221,19 @@ export class WhatsAppService {
       };
     } catch (err: any) {
       console.error(`[WhatsApp Error] Network error connecting to Meta Cloud API: ${err.message}`);
+      const isTimeout =
+        err.name === 'AbortError' ||
+        err.name === 'TimeoutError' ||
+        /timeout|timed out|ETIMEDOUT|ESOCKETTIMEDOUT|ECONNRESET/i.test(err.message || '');
       return {
         success: false,
         status: 'failed',
         httpStatus: 503,
         errorCode: 503,
-        errorTitle: 'Network Error',
+        errorTitle: isTimeout ? 'Network Timeout' : 'Network Error',
         errorMessage: `Could not reach Meta WhatsApp Cloud API: ${err.message}`,
         errorDetails: err.stack,
+        isAmbiguousTimeout: isTimeout,
       };
     }
   }

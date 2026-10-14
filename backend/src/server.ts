@@ -10,6 +10,7 @@ import campaignsRouter from './routes/campaigns';
 import webhookRouter from './routes/webhook';
 import templatesRouter from './routes/templates';
 import authRouter from './routes/auth';
+import consentRouter from './routes/consent';
 
 export const app = express();
 
@@ -63,6 +64,7 @@ app.use('/api/campaigns', campaignsRouter);
 app.use('/api/webhook', webhookRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/auth', authRouter);
+app.use('/api/consent', consentRouter);
 
 // Root informational endpoint
 app.get('/', (_req, res) => {

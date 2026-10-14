@@ -22,7 +22,7 @@ test('Brevo Configuration & Security', async (t) => {
 });
 
 test('Auth Store & OTP Security', async (t) => {
-  userStore.clear();
+  await userStore.clear();
 
   const testEmail = 'priya.sharma@example.com';
   const testPassword = 'Password123!';
@@ -30,8 +30,8 @@ test('Auth Store & OTP Security', async (t) => {
   const otpHash = crypto.createHash('sha256').update(rawOtp).digest('hex');
   const passwordHash = await bcrypt.hash(testPassword, 10);
 
-  await t.test('Saves OTP with 10-minute expiry and hashes securely', () => {
-    userStore.saveOtp({
+  await t.test('Saves OTP with 10-minute expiry and hashes securely', async () => {
+    await userStore.saveOtp({
       email: testEmail,
       name: 'Priya Sharma',
       passwordHash,
@@ -42,7 +42,7 @@ test('Auth Store & OTP Security', async (t) => {
       lastRequestedAt: Date.now(),
     });
 
-    const record = userStore.getOtp(testEmail);
+    const record = await userStore.getOtp(testEmail);
     assert.ok(record);
     assert.strictEqual(record.email, testEmail);
     assert.strictEqual(record.otpHash, otpHash);
@@ -50,10 +50,10 @@ test('Auth Store & OTP Security', async (t) => {
     assert.notStrictEqual(record.otpHash, rawOtp);
   });
 
-  await t.test('Incrementing attempts tracks failed verification tries', () => {
-    const attempts1 = userStore.incrementOtpAttempts(testEmail);
+  await t.test('Incrementing attempts tracks failed verification tries', async () => {
+    const attempts1 = await userStore.incrementOtpAttempts(testEmail);
     assert.strictEqual(attempts1, 1);
-    const attempts2 = userStore.incrementOtpAttempts(testEmail);
+    const attempts2 = await userStore.incrementOtpAttempts(testEmail);
     assert.strictEqual(attempts2, 2);
   });
 
@@ -65,8 +65,8 @@ test('Auth Store & OTP Security', async (t) => {
     assert.strictEqual(invalid, false);
   });
 
-  await t.test('Creating verified user and ensuring passwordHash is excluded from SafeUser', () => {
-    const user = userStore.saveUser({
+  await t.test('Creating verified user and ensuring passwordHash is excluded from SafeUser', async () => {
+    const user = await userStore.saveUser({
       id: 'usr_test_123',
       name: 'Priya Sharma',
       email: testEmail,
@@ -83,8 +83,8 @@ test('Auth Store & OTP Security', async (t) => {
     assert.strictEqual(safe.name, 'Priya Sharma');
   });
 
-  await t.test('Preserves businessName and phone in OtpRecord and User', () => {
-    userStore.saveOtp({
+  await t.test('Preserves businessName and phone in OtpRecord and User', async () => {
+    await userStore.saveOtp({
       email: 'aura@example.com',
       name: 'Pooja',
       passwordHash,
@@ -97,11 +97,11 @@ test('Auth Store & OTP Security', async (t) => {
       lastRequestedAt: Date.now(),
     });
 
-    const otp = userStore.getOtp('aura@example.com');
+    const otp = await userStore.getOtp('aura@example.com');
     assert.strictEqual(otp?.businessName, 'Aura Luxury Spa');
     assert.strictEqual(otp?.phone, '+91 98765 43210');
 
-    const created = userStore.saveUser({
+    const created = await userStore.saveUser({
       id: 'usr_aura',
       name: 'Pooja',
       email: 'aura@example.com',
@@ -118,9 +118,9 @@ test('Auth Store & OTP Security', async (t) => {
     assert.strictEqual(safe.phone, '+91 98765 43210');
   });
 
-  await t.test('Deleting OTP makes it single-use', () => {
-    userStore.deleteOtp(testEmail);
-    const record = userStore.getOtp(testEmail);
+  await t.test('Deleting OTP makes it single-use', async () => {
+    await userStore.deleteOtp(testEmail);
+    const record = await userStore.getOtp(testEmail);
     assert.strictEqual(record, undefined);
   });
 });

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { env } from '../config/env';
+import { env, getWebhookVerifyToken } from '../config/env';
 import { WebhookService } from '../services/webhookService';
 
 const router = Router();
@@ -7,13 +7,20 @@ const router = Router();
 /**
  * GET /api/webhook/whatsapp
  * Meta WhatsApp Cloud API Webhook verification challenge.
+ * Accepts either META_VERIFY_TOKEN or WHATSAPP_WEBHOOK_VERIFY_TOKEN for consistent environment configuration.
  */
 router.get('/whatsapp', (req: Request, res: Response) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === env.META_VERIFY_TOKEN) {
+  const expectedToken = getWebhookVerifyToken();
+  const tokenMatches =
+    token === expectedToken ||
+    token === env.META_VERIFY_TOKEN ||
+    (env.WHATSAPP_WEBHOOK_VERIFY_TOKEN && token === env.WHATSAPP_WEBHOOK_VERIFY_TOKEN);
+
+  if (mode === 'subscribe' && tokenMatches) {
     console.log('[Webhook] Meta verification successful');
     res.status(200).send(challenge);
   } else {
@@ -26,9 +33,9 @@ router.get('/whatsapp', (req: Request, res: Response) => {
  * POST /api/webhook/whatsapp
  * Receives delivery status receipts (sent, delivered, read, failed) from Meta.
  */
-router.post('/whatsapp', (req: Request, res: Response) => {
+router.post('/whatsapp', async (req: Request, res: Response) => {
   try {
-    WebhookService.processWebhookPayload(req.body);
+    await WebhookService.processWebhookPayload(req.body);
     // Meta requires immediate 200 OK
     res.sendStatus(200);
   } catch (err: any) {

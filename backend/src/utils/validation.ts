@@ -25,12 +25,16 @@ export const recipientSchema = z.object({
   localCustomerId: z.string().nullish(),
   name: z.string().nullish(),
   phone: z.string().min(10, 'Valid phone number is required'),
+  hasConsent: z.boolean().nullish(),
+  consentRecordedAt: z.string().nullish(),
 });
 
 export const campaignSendSchema = z.object({
+  clientRequestToken: z.string().nullish(),
   campaignId: z.string().nullish(),
   businessName: z.string().nullish(),
   campaignName: z.string().min(1, 'campaignName is required'),
+  mode: z.enum(['demo', 'test', 'production']).nullish().default('test'),
   templateId: z.string().nullish(),
   templateName: z.string().min(1, 'templateName is required'),
   templateLanguage: z.string().nullish().default('en_US'),

@@ -1,8 +1,8 @@
-import fs from 'fs';
-import path from 'path';
+import { PoolClient } from 'pg';
+import { getPool } from '../db/pool';
 import { WhatsAppTemplate, TemplateApprovalStatus, MetaTemplateStatus } from '../types/template';
 
-const SEED_TEMPLATES: WhatsAppTemplate[] = [
+export const SEED_TEMPLATES: WhatsAppTemplate[] = [
   {
     id: 'tpl_hello_world',
     name: 'hello_world',
@@ -14,6 +14,8 @@ const SEED_TEMPLATES: WhatsAppTemplate[] = [
     metaStatus: 'APPROVED',
     body: 'Hello World',
     variables: [],
+    mode: 'test',
+    wabaId: '1633948435034571',
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
   },
@@ -32,6 +34,7 @@ const SEED_TEMPLATES: WhatsAppTemplate[] = [
       name: 'Nikhil',
       business_name: 'Luxspa',
     },
+    mode: 'test',
     createdAt: '2026-02-01T00:00:00.000Z',
     updatedAt: '2026-02-01T00:00:00.000Z',
   },
@@ -49,6 +52,7 @@ const SEED_TEMPLATES: WhatsAppTemplate[] = [
     exampleValues: {
       business_name: 'Luxspa & Wellness',
     },
+    mode: 'test',
     createdAt: '2026-02-01T00:00:00.000Z',
     updatedAt: '2026-02-01T00:00:00.000Z',
   },
@@ -67,6 +71,7 @@ const SEED_TEMPLATES: WhatsAppTemplate[] = [
       name: 'Ananya',
       business_name: 'Our Spa & Wellness',
     },
+    mode: 'test',
     createdAt: '2026-02-01T00:00:00.000Z',
     updatedAt: '2026-02-01T00:00:00.000Z',
   },
@@ -81,6 +86,7 @@ const SEED_TEMPLATES: WhatsAppTemplate[] = [
     metaStatus: 'NOT_SUBMITTED',
     body: '✨ Exclusive VIP invitation for {name} from {business_name}. Enjoy priority booking!',
     variables: ['name', 'business_name'],
+    mode: 'test',
     createdAt: '2026-03-01T00:00:00.000Z',
     updatedAt: '2026-03-01T00:00:00.000Z',
   },
@@ -95,141 +101,324 @@ const SEED_TEMPLATES: WhatsAppTemplate[] = [
     metaStatus: 'PENDING',
     body: '🎉 Grand Festive Sale at {business_name}! Enjoy 40% OFF all therapies this weekend, {name}!',
     variables: ['business_name', 'name'],
+    mode: 'test',
     createdAt: '2026-03-05T00:00:00.000Z',
     updatedAt: '2026-03-05T00:00:00.000Z',
   },
 ];
 
-class TemplateStore {
-  private templates = new Map<string, WhatsAppTemplate>(); // key: id or name
-  private storageFile: string;
+export class TemplateStore {
+  private seeded = false;
 
-  constructor() {
-    const dataDir = path.join(process.cwd(), 'data');
-    if (!fs.existsSync(dataDir)) {
+  private mapRow(row: any): WhatsAppTemplate {
+    let variables: string[] = [];
+    if (Array.isArray(row.variables)) {
+      variables = row.variables;
+    } else if (typeof row.variables === 'string') {
       try {
-        fs.mkdirSync(dataDir, { recursive: true });
+        variables = JSON.parse(row.variables);
       } catch {
-        // Fallback
+        variables = [];
       }
     }
-    this.storageFile = path.join(dataDir, 'templates.json');
-    this.loadFromDisk();
-  }
 
-  private loadFromDisk() {
-    try {
-      if (fs.existsSync(this.storageFile)) {
-        const raw = fs.readFileSync(this.storageFile, 'utf8');
-        const list: WhatsAppTemplate[] = JSON.parse(raw);
-        for (const tpl of list) {
-          this.templates.set(tpl.id, tpl);
+    let exampleValues: Record<string, string> | undefined = undefined;
+    if (row.example_values) {
+      if (typeof row.example_values === 'object') {
+        exampleValues = row.example_values;
+      } else if (typeof row.example_values === 'string') {
+        try {
+          exampleValues = JSON.parse(row.example_values);
+        } catch {
+          exampleValues = undefined;
         }
       }
-    } catch {
-      // Ignore
     }
 
-    // Seed defaults if empty
-    if (this.templates.size === 0) {
-      for (const tpl of SEED_TEMPLATES) {
-        this.templates.set(tpl.id, tpl);
-      }
-      this.saveToDisk();
+    return {
+      id: row.id,
+      name: row.name,
+      displayName: row.display_name,
+      description: row.description || undefined,
+      category: row.category,
+      language: row.language,
+      status: row.status as TemplateApprovalStatus,
+      metaStatus: row.meta_status as MetaTemplateStatus,
+      metaTemplateId: row.meta_template_id || undefined,
+      body: row.body,
+      variables,
+      exampleValues,
+      wabaId: row.waba_id || undefined,
+      mode: (row.mode as 'test' | 'production') || 'test',
+      lastSyncedAt: row.last_synced_at ? new Date(row.last_synced_at).toISOString() : undefined,
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString(),
+    };
+  }
+
+  /**
+   * Seeds default templates idempotently into PostgreSQL.
+   * Never overwrites or replaces an approved Meta template or existing record.
+   */
+  public async seedDefaults(): Promise<void> {
+    if (this.seeded) return;
+    const pool = getPool();
+
+    for (const tpl of SEED_TEMPLATES) {
+      await pool.query(
+        `INSERT INTO whatsapp_templates (
+          id, name, display_name, description, category, language,
+          status, meta_status, body, variables, example_values,
+          waba_id, mode, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+        ON CONFLICT (id) DO NOTHING;`,
+        [
+          tpl.id,
+          tpl.name,
+          tpl.displayName,
+          tpl.description || null,
+          tpl.category,
+          tpl.language,
+          tpl.status,
+          tpl.metaStatus,
+          tpl.body,
+          JSON.stringify(tpl.variables || []),
+          tpl.exampleValues ? JSON.stringify(tpl.exampleValues) : null,
+          tpl.wabaId || null,
+          tpl.mode || 'test',
+        ]
+      );
     }
+    this.seeded = true;
   }
 
-  private saveToDisk() {
-    try {
-      const list = Array.from(this.templates.values());
-      fs.writeFileSync(this.storageFile, JSON.stringify(list, null, 2), 'utf8');
-    } catch {
-      // Ignore
+  /**
+   * Retrieves all templates from PostgreSQL, optionally filtered by mode ('test' | 'production').
+   */
+  public async getAll(mode?: 'test' | 'production'): Promise<WhatsAppTemplate[]> {
+    await this.seedDefaults();
+    const pool = getPool();
+
+    let query = `SELECT * FROM whatsapp_templates`;
+    const params: any[] = [];
+
+    if (mode === 'production') {
+      query += ` WHERE mode = 'production'`;
+    } else if (mode === 'test') {
+      query += ` WHERE mode = 'test'`;
     }
+    query += ` ORDER BY created_at ASC;`;
+
+    const res = await pool.query(query, params);
+    return res.rows.map((r) => this.mapRow(r));
   }
 
-  public getAll(): WhatsAppTemplate[] {
-    return Array.from(this.templates.values());
-  }
+  /**
+   * Retrieves a template by its primary key ID.
+   */
+  public async getById(id: string): Promise<WhatsAppTemplate | undefined> {
+    await this.seedDefaults();
+    const pool = getPool();
 
-  public getById(id: string): WhatsAppTemplate | undefined {
-    return this.templates.get(id);
-  }
-
-  public get(idOrName: string): WhatsAppTemplate | undefined {
-    return this.findByIdOrName(idOrName);
-  }
-
-  public getApproved(): WhatsAppTemplate[] {
-    return Array.from(this.templates.values()).filter((t) => t.status === 'approved');
-  }
-
-  public getByName(name: string): WhatsAppTemplate | undefined {
-    return Array.from(this.templates.values()).find(
-      (t) => t.name.toLowerCase() === name.toLowerCase()
+    const res = await pool.query(
+      `SELECT * FROM whatsapp_templates WHERE id = $1 LIMIT 1;`,
+      [id.trim()]
     );
+
+    if (res.rows.length === 0) return undefined;
+    return this.mapRow(res.rows[0]);
   }
 
-  public findByIdOrName(idOrName: string): WhatsAppTemplate | undefined {
-    return (
-      this.templates.get(idOrName) ||
-      Array.from(this.templates.values()).find(
-        (t) => t.name.toLowerCase() === idOrName.toLowerCase()
+  /**
+   * Retrieves a template by Meta name, strictly respecting mode isolation.
+   */
+  public async getByName(name: string, mode?: 'test' | 'production'): Promise<WhatsAppTemplate | undefined> {
+    await this.seedDefaults();
+    const pool = getPool();
+
+    let query = `SELECT * FROM whatsapp_templates WHERE LOWER(name) = LOWER($1)`;
+    const params: any[] = [name.trim()];
+
+    if (mode === 'production') {
+      query += ` AND mode = 'production'`;
+    } else if (mode === 'test') {
+      query += ` AND mode = 'test'`;
+    }
+    query += ` ORDER BY updated_at DESC LIMIT 1;`;
+
+    const res = await pool.query(query, params);
+    if (res.rows.length === 0) return undefined;
+    return this.mapRow(res.rows[0]);
+  }
+
+  /**
+   * Retrieves a template by ID or Meta name, strictly respecting mode isolation.
+   * In production mode, sandbox templates can NEVER be returned.
+   */
+  public async findByIdOrName(
+    idOrName: string,
+    mode?: 'test' | 'production'
+  ): Promise<WhatsAppTemplate | undefined> {
+    await this.seedDefaults();
+    const pool = getPool();
+    const clean = idOrName.trim();
+
+    let query = `SELECT * FROM whatsapp_templates WHERE (id = $1 OR LOWER(name) = LOWER($1))`;
+    const params: any[] = [clean];
+
+    if (mode === 'production') {
+      query += ` AND mode = 'production'`;
+    } else if (mode === 'test') {
+      query += ` AND mode = 'test'`;
+    }
+    query += ` ORDER BY (CASE WHEN id = $1 THEN 0 ELSE 1 END), updated_at DESC LIMIT 1;`;
+
+    const res = await pool.query(query, params);
+    if (res.rows.length === 0) return undefined;
+    return this.mapRow(res.rows[0]);
+  }
+
+  /**
+   * Alias for findByIdOrName.
+   */
+  public async get(idOrName: string, mode?: 'test' | 'production'): Promise<WhatsAppTemplate | undefined> {
+    return this.findByIdOrName(idOrName, mode);
+  }
+
+  /**
+   * Retrieves all approved templates, optionally filtered by mode.
+   */
+  public async getApproved(mode?: 'test' | 'production'): Promise<WhatsAppTemplate[]> {
+    await this.seedDefaults();
+    const pool = getPool();
+
+    let query = `SELECT * FROM whatsapp_templates WHERE status = 'approved'`;
+    const params: any[] = [];
+
+    if (mode === 'production') {
+      query += ` AND mode = 'production'`;
+    } else if (mode === 'test') {
+      query += ` AND mode = 'test'`;
+    }
+    query += ` ORDER BY created_at ASC;`;
+
+    const res = await pool.query(query, params);
+    return res.rows.map((r) => this.mapRow(r));
+  }
+
+  /**
+   * Inserts or upserts a template into PostgreSQL.
+   */
+  public async create(tpl: WhatsAppTemplate): Promise<WhatsAppTemplate> {
+    const pool = getPool();
+
+    const res = await pool.query(
+      `INSERT INTO whatsapp_templates (
+        id, name, display_name, description, category, language,
+        status, meta_status, meta_template_id, body, variables, example_values,
+        waba_id, mode, last_synced_at, created_at, updated_at
       )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+      ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        display_name = EXCLUDED.display_name,
+        description = COALESCE(EXCLUDED.description, whatsapp_templates.description),
+        category = EXCLUDED.category,
+        language = EXCLUDED.language,
+        status = EXCLUDED.status,
+        meta_status = EXCLUDED.meta_status,
+        meta_template_id = COALESCE(EXCLUDED.meta_template_id, whatsapp_templates.meta_template_id),
+        body = EXCLUDED.body,
+        variables = EXCLUDED.variables,
+        example_values = COALESCE(EXCLUDED.example_values, whatsapp_templates.example_values),
+        waba_id = COALESCE(EXCLUDED.waba_id, whatsapp_templates.waba_id),
+        mode = EXCLUDED.mode,
+        last_synced_at = COALESCE(EXCLUDED.last_synced_at, whatsapp_templates.last_synced_at),
+        updated_at = NOW()
+      RETURNING *;`,
+      [
+        tpl.id,
+        tpl.name,
+        tpl.displayName,
+        tpl.description || null,
+        tpl.category,
+        tpl.language || 'en_US',
+        tpl.status,
+        tpl.metaStatus,
+        tpl.metaTemplateId || null,
+        tpl.body,
+        JSON.stringify(tpl.variables || []),
+        tpl.exampleValues ? JSON.stringify(tpl.exampleValues) : null,
+        tpl.wabaId || null,
+        tpl.mode || 'test',
+        tpl.lastSyncedAt ? new Date(tpl.lastSyncedAt) : null,
+        tpl.createdAt ? new Date(tpl.createdAt) : new Date(),
+      ]
     );
+
+    return this.mapRow(res.rows[0]);
   }
 
-  public create(tpl: WhatsAppTemplate): WhatsAppTemplate {
-    this.templates.set(tpl.id, tpl);
-    this.saveToDisk();
-    return tpl;
-  }
-
-  public update(id: string, updates: Partial<WhatsAppTemplate>): WhatsAppTemplate | undefined {
-    const existing = this.templates.get(id);
+  /**
+   * Updates an existing template by ID.
+   */
+  public async update(id: string, updates: Partial<WhatsAppTemplate>): Promise<WhatsAppTemplate | undefined> {
+    const existing = await this.getById(id);
     if (!existing) return undefined;
 
-    const updated: WhatsAppTemplate = {
+    const merged: WhatsAppTemplate = {
       ...existing,
       ...updates,
       updatedAt: new Date().toISOString(),
     };
-    this.templates.set(id, updated);
-    this.saveToDisk();
-    return updated;
+
+    return this.create(merged);
   }
 
-  public updateStatus(
+  /**
+   * Updates template approval and meta statuses.
+   */
+  public async updateStatus(
     id: string,
     status: TemplateApprovalStatus,
     metaStatus?: MetaTemplateStatus
-  ): WhatsAppTemplate | undefined {
-    const tpl = this.templates.get(id);
-    if (!tpl) return undefined;
+  ): Promise<WhatsAppTemplate | undefined> {
+    const pool = getPool();
+    const res = await pool.query(
+      `UPDATE whatsapp_templates
+       SET status = $2,
+           meta_status = COALESCE($3, meta_status),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *;`,
+      [id.trim(), status, metaStatus || null]
+    );
 
-    tpl.status = status;
-    if (metaStatus) {
-      tpl.metaStatus = metaStatus;
-    }
-    tpl.updatedAt = new Date().toISOString();
-    this.saveToDisk();
-    return tpl;
+    if (res.rows.length === 0) return undefined;
+    return this.mapRow(res.rows[0]);
   }
 
-  public delete(id: string): boolean {
-    const existed = this.templates.delete(id);
-    if (existed) {
-      this.saveToDisk();
-    }
-    return existed;
+  /**
+   * Deletes a template by ID.
+   */
+  public async delete(id: string): Promise<boolean> {
+    const pool = getPool();
+    const res = await pool.query(
+      `DELETE FROM whatsapp_templates WHERE id = $1;`,
+      [id.trim()]
+    );
+    return (res.rowCount ?? 0) > 0;
   }
 
-  public clear(): void {
-    this.templates.clear();
-    for (const tpl of SEED_TEMPLATES) {
-      this.templates.set(tpl.id, tpl);
-    }
-    this.saveToDisk();
+  /**
+   * Clears custom templates and resets defaults (used in test fixtures).
+   */
+  public async clear(): Promise<void> {
+    const pool = getPool();
+    await pool.query('DELETE FROM whatsapp_templates;');
+    this.seeded = false;
+    await this.seedDefaults();
   }
 }
 

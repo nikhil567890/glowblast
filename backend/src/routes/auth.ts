@@ -83,7 +83,7 @@ router.post('/register/request-otp', async (req: Request, res: Response) => {
   console.log(`[Auth] Register OTP request\nendpoint=${req.baseUrl}${req.path}\nemail=${maskEmail(email)}`);
 
   // 1. Check if user with this email is already registered and verified
-  const existingUser = userStore.findByEmail(email);
+  const existingUser = await userStore.findByEmail(email);
   if (existingUser && existingUser.emailVerified) {
     res.status(400).json({
       success: false,
@@ -96,7 +96,7 @@ router.post('/register/request-otp', async (req: Request, res: Response) => {
   }
 
   // 2. Check resend cooldown (60 seconds)
-  const existingOtp = userStore.getOtp(email);
+  const existingOtp = await userStore.getOtp(email);
   if (existingOtp) {
     const elapsedSeconds = (Date.now() - existingOtp.lastRequestedAt) / 1000;
     if (elapsedSeconds < 60) {
@@ -112,9 +112,9 @@ router.post('/register/request-otp', async (req: Request, res: Response) => {
     }
   }
 
-  // 3. Cryptographically secure 6-digit OTP
+  // 3. Cryptographically secure 6-digit OTP hashed with server HMAC secret
   const rawOtp = crypto.randomInt(100000, 1000000).toString();
-  const otpHash = crypto.createHash('sha256').update(rawOtp).digest('hex');
+  const otpHash = crypto.createHmac('sha256', env.OTP_HMAC_SECRET).update(rawOtp).digest('hex');
 
   // 4. Secure password hashing
   const passwordHash = await bcrypt.hash(password, 10);
@@ -133,7 +133,7 @@ router.post('/register/request-otp', async (req: Request, res: Response) => {
     lastRequestedAt: Date.now(),
   };
 
-  userStore.saveOtp(otpRecord);
+  await userStore.saveOtp(otpRecord);
 
   // 6. Send transactional email via Brevo
   const emailResult = await BrevoEmailService.sendVerificationOtp({
@@ -183,7 +183,7 @@ router.post('/register/verify-otp', async (req: Request, res: Response) => {
   console.log(`[Auth] Verify OTP request\nendpoint=${req.baseUrl}${req.path}\nemail=${maskEmail(email)}`);
 
   // Retrieve pending OTP
-  const record = userStore.getOtp(email);
+  const record = await userStore.getOtp(email);
   if (!record) {
     res.status(400).json({
       success: false,
@@ -197,7 +197,7 @@ router.post('/register/verify-otp', async (req: Request, res: Response) => {
 
   // Check attempt limit (max 5)
   if (record.attempts >= 5) {
-    userStore.deleteOtp(email);
+    await userStore.deleteOtp(email);
     res.status(400).json({
       success: false,
       error: {
@@ -209,10 +209,10 @@ router.post('/register/verify-otp', async (req: Request, res: Response) => {
   }
 
   // Increment attempts
-  userStore.incrementOtpAttempts(email);
+  await userStore.incrementOtpAttempts(email);
 
-  // Compare OTP securely using constant-time comparison
-  const inputHash = crypto.createHash('sha256').update(otp).digest('hex');
+  // Compare OTP securely using HMAC-SHA-256 and constant-time comparison
+  const inputHash = crypto.createHmac('sha256', env.OTP_HMAC_SECRET).update(otp).digest('hex');
   const isMatch = crypto.timingSafeEqual(
     Buffer.from(inputHash, 'utf8'),
     Buffer.from(record.otpHash, 'utf8')
@@ -230,11 +230,11 @@ router.post('/register/verify-otp', async (req: Request, res: Response) => {
   }
 
   // Invalidate OTP immediately (one-time use)
-  userStore.deleteOtp(email);
+  await userStore.deleteOtp(email);
 
   // Create or activate user
   const nowStr = new Date().toISOString();
-  let user = userStore.findByEmail(email);
+  let user = await userStore.findByEmail(email);
 
   if (user) {
     user.name = record.name;
@@ -259,7 +259,7 @@ router.post('/register/verify-otp', async (req: Request, res: Response) => {
     };
   }
 
-  userStore.saveUser(user);
+  await userStore.saveUser(user);
 
   // Generate secure JWT token
   const token = jwt.sign(
@@ -298,7 +298,7 @@ router.post('/login', async (req: Request, res: Response) => {
   // Safe diagnostic logging
   console.log(`[Auth] Login request\nendpoint=${req.baseUrl}${req.path}\nemail=${maskEmail(email)}`);
 
-  const user = userStore.findByEmail(email);
+  const user = await userStore.findByEmail(email);
   if (!user) {
     res.status(401).json({
       success: false,
@@ -334,7 +334,7 @@ router.post('/login', async (req: Request, res: Response) => {
   }
 
   user.lastLoginAt = new Date().toISOString();
-  userStore.saveUser(user);
+  await userStore.saveUser(user);
 
   const token = jwt.sign(
     { sub: user.id, email: user.email, name: user.name },
@@ -364,7 +364,7 @@ router.post('/logout', (_req: Request, res: Response) => {
  * GET /api/auth/me
  * Validates JWT token and returns current user info.
  */
-router.get('/me', (req: Request, res: Response) => {
+router.get('/me', async (req: Request, res: Response) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     res.status(401).json({
@@ -380,7 +380,7 @@ router.get('/me', (req: Request, res: Response) => {
   const token = authHeader.substring(7).trim();
   try {
     const payload = jwt.verify(token, env.JWT_SECRET) as { sub: string };
-    const user = userStore.findById(payload.sub);
+    const user = await userStore.findById(payload.sub);
     if (!user) {
       res.status(401).json({
         success: false,

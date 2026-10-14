@@ -85,8 +85,8 @@ class RealtimeService {
     this.broadcastCampaignProgress(payload.campaignId);
   }
 
-  public broadcastCampaignProgress(campaignId: string) {
-    const summary = campaignStore.getSummary(campaignId);
+  public async broadcastCampaignProgress(campaignId: string): Promise<void> {
+    const summary = await campaignStore.getSummary(campaignId);
     if (!summary) return;
 
     const relevantClients = this.clients.filter((c) => c.campaignId === campaignId);

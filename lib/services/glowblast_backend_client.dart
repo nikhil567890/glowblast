@@ -40,6 +40,10 @@ class BackendWhatsAppStatus {
   final int testRecipientLimit;
   final String displayNumber;
   final String apiVersion;
+  final bool isProductionEnabled;
+  final bool isProductionConfigured;
+  final String? productionDisplayNumber;
+  final int productionDailyLimit;
 
   BackendWhatsAppStatus({
     required this.configured,
@@ -49,9 +53,16 @@ class BackendWhatsAppStatus {
     required this.testRecipientLimit,
     required this.displayNumber,
     required this.apiVersion,
+    this.isProductionEnabled = false,
+    this.isProductionConfigured = false,
+    this.productionDisplayNumber,
+    this.productionDailyLimit = 200,
   });
 
   factory BackendWhatsAppStatus.fromJson(Map<String, dynamic> json) {
+    final modes = json['modes'] as Map<String, dynamic>?;
+    final prod = modes?['production'] as Map<String, dynamic>?;
+
     return BackendWhatsAppStatus(
       configured: json['configured'] == true,
       phoneNumberIdConfigured: json['phoneNumberIdConfigured'] == true,
@@ -60,6 +71,10 @@ class BackendWhatsAppStatus {
       testRecipientLimit: (json['testRecipientLimit'] as num?)?.toInt() ?? 5,
       displayNumber: json['displayNumber']?.toString() ?? '+1 (555) 632-5494',
       apiVersion: json['apiVersion']?.toString() ?? 'v22.0',
+      isProductionEnabled: prod?['enabled'] == true,
+      isProductionConfigured: prod?['configured'] == true,
+      productionDisplayNumber: prod?['displayNumber']?.toString(),
+      productionDailyLimit: (prod?['dailyUniqueLimit'] as num?)?.toInt() ?? 200,
     );
   }
 }
@@ -212,10 +227,11 @@ class GlowBlastBackendClient {
     String templateLanguage = 'en_US',
     List<String>? templateVariables,
     List<Map<String, dynamic>>? templateComponents,
-    required List<Map<String, String>> recipients,
+    required List<Map<String, dynamic>> recipients,
     List<String> optedOutPhones = const [],
     Map<String, dynamic>? metadata,
     String? token,
+    String mode = 'test',
   }) async {
     final payload = <String, dynamic>{
       'campaignId': campaignId,
@@ -224,6 +240,7 @@ class GlowBlastBackendClient {
       'templateLanguage': templateLanguage,
       'recipients': recipients,
       'optedOutPhones': optedOutPhones,
+      'mode': mode,
     };
     if (businessName != null && businessName.trim().isNotEmpty) {
       payload['businessName'] = businessName.trim();
@@ -325,10 +342,11 @@ class GlowBlastBackendClient {
   }
 
   /// Fetches all registered WhatsApp templates from backend.
-  Future<List<Map<String, dynamic>>> getTemplates() async {
+  Future<List<Map<String, dynamic>>> getTemplates({String? mode}) async {
     try {
+      final query = mode != null ? '?mode=$mode' : '';
       final response = await _httpClient
-          .get(_uri('/api/templates'))
+          .get(_uri('/api/templates$query'))
           .timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -339,6 +357,32 @@ class GlowBlastBackendClient {
       return [];
     } catch (_) {
       return [];
+    }
+  }
+
+  /// Synchronizes templates with Meta WhatsApp Business Account (?mode=test|production).
+  Future<Map<String, dynamic>> syncTemplates({String mode = 'test'}) async {
+    try {
+      final response = await _httpClient
+          .post(
+            _uri('/api/templates/sync?mode=$mode'),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 15));
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      return {
+        'success': response.statusCode == 200 && data['success'] == true,
+        'statusCode': response.statusCode,
+        ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {
+          'code': 'NETWORK_ERROR',
+          'message': 'Failed to sync templates: $e',
+        },
+      };
     }
   }
 
@@ -390,32 +434,6 @@ class GlowBlastBackendClient {
     }
   }
 
-  /// Synchronizes templates with official Meta WhatsApp Business Platform.
-  Future<Map<String, dynamic>> syncTemplates() async {
-    try {
-      final response = await _httpClient
-          .post(
-            _uri('/api/templates/sync'),
-            headers: {'Content-Type': 'application/json'},
-          )
-          .timeout(const Duration(seconds: 15));
-
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
-      return {
-        'success': data['success'] == true,
-        'statusCode': response.statusCode,
-        ...data,
-      };
-    } catch (e) {
-      return {
-        'success': false,
-        'error': {
-          'code': 'NETWORK_ERROR',
-          'message': 'Could not connect to backend template sync: $e',
-        },
-      };
-    }
-  }
 
   /// Updates local approval status of a template.
   Future<Map<String, dynamic>> updateTemplateStatus({

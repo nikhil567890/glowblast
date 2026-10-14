@@ -99,7 +99,7 @@ describe('Campaign Status Computation & Recipient Validation', () => {
     assert.strictEqual(dispatchRes.campaign?.queued, 1);
     assert.strictEqual(dispatchRes.campaign?.accepted, 0);
 
-    const summary = campaignStore.getSummary(uniqueId);
+    const summary = await campaignStore.getSummary(uniqueId);
     assert.ok(summary);
     assert.strictEqual(summary.campaignId, uniqueId);
     assert.strictEqual(summary.total, 1);
@@ -122,9 +122,13 @@ describe('Campaign Status Computation & Recipient Validation', () => {
     });
 
     // Wait for async dispatch loop
-    await new Promise((r) => setTimeout(r, 600));
+    let summary: any;
+    for (let i = 0; i < 25; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      summary = await campaignStore.getSummary(uniqueId);
+      if (summary && summary.status !== 'processing') break;
+    }
 
-    const summary = campaignStore.getSummary(uniqueId);
     assert.ok(summary);
     // Since all failed, status MUST be 'failed', NEVER 'completed'
     assert.strictEqual(summary.status, 'failed');
@@ -133,7 +137,7 @@ describe('Campaign Status Computation & Recipient Validation', () => {
     assert.strictEqual(summary.sent, 0);
 
     // Verify error transparency on stored messages
-    const camp = campaignStore.get(uniqueId);
+    const camp = await campaignStore.get(uniqueId);
     assert.ok(camp);
     for (const msg of camp.messages) {
       assert.strictEqual(msg.status, 'failed');
@@ -142,7 +146,7 @@ describe('Campaign Status Computation & Recipient Validation', () => {
     }
   });
 
-  test('calculateCampaignStatus accurately distinguishes completed, completed_with_errors, and failed', () => {
+  test('calculateCampaignStatus accurately distinguishes completed, completed_with_errors, and failed', async () => {
     const testCampId = `CALC-STATUS-${Date.now()}`;
     const now = new Date().toISOString();
 
@@ -168,10 +172,10 @@ describe('Campaign Status Computation & Recipient Validation', () => {
       updatedAt: now,
     };
 
-    messageStore.upsert(m1);
-    messageStore.upsert(m2);
+    await messageStore.upsert(m1);
+    await messageStore.upsert(m2);
 
-    campaignStore.create({
+    await campaignStore.create({
       campaignId: testCampId,
       campaignName: 'Mixed Test',
       status: 'processing',
@@ -188,23 +192,27 @@ describe('Campaign Status Computation & Recipient Validation', () => {
       updatedAt: now,
     });
 
-    const status = campaignStore.calculateCampaignStatus(testCampId);
+    const status = await campaignStore.calculateCampaignStatus(testCampId);
     assert.strictEqual(status, 'completed_with_errors');
 
     // If both failed:
-    messageStore.updateStatus(m1.id, 'failed');
-    const allFailedStatus = campaignStore.calculateCampaignStatus(testCampId);
+    await messageStore.updateStatus(m1.id, 'failed');
+    const allFailedStatus = await campaignStore.calculateCampaignStatus(testCampId);
     assert.strictEqual(allFailedStatus, 'failed');
   });
 });
 
 describe('Webhook Status Progression & Idempotency', () => {
-  const campId = `WH-TEST-${Date.now()}`;
+  let campId: string;
+  let providerMsgId: string;
+  let internalMsgId: string;
   const now = new Date().toISOString();
-  const providerMsgId = `wamid.TEST_${Date.now()}`;
-  const internalMsgId = `${campId}_cust1`;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    campId = `WH-TEST-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    providerMsgId = `wamid.TEST_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    internalMsgId = `${campId}_cust1`;
+
     const msg = {
       id: internalMsgId,
       campaignId: campId,
@@ -216,9 +224,9 @@ describe('Webhook Status Progression & Idempotency', () => {
       createdAt: now,
       updatedAt: now,
     };
-    messageStore.upsert(msg);
+    await messageStore.upsert(msg);
 
-    campaignStore.create({
+    await campaignStore.create({
       campaignId: campId,
       campaignName: 'Webhook Campaign',
       status: 'processing',
@@ -236,9 +244,9 @@ describe('Webhook Status Progression & Idempotency', () => {
     });
   });
 
-  test('Webhook moves message from accepted to sent, then delivered, then read', () => {
+  test('Webhook moves message from accepted to sent, then delivered, then read', async () => {
     // 1. Sent webhook
-    WebhookService.processWebhookPayload({
+    await WebhookService.processWebhookPayload({
       object: 'whatsapp_business_account',
       entry: [
         {
@@ -264,14 +272,14 @@ describe('Webhook Status Progression & Idempotency', () => {
       ],
     });
 
-    let msg = messageStore.getByProviderId(providerMsgId);
+    let msg = await messageStore.getByProviderId(providerMsgId);
     assert.strictEqual(msg?.status, 'sent');
-    let summary = campaignStore.getSummary(campId);
+    let summary = await campaignStore.getSummary(campId);
     assert.strictEqual(summary?.sent, 1);
     assert.strictEqual(summary?.delivered, 0);
 
     // 2. Delivered webhook
-    WebhookService.processWebhookPayload({
+    await WebhookService.processWebhookPayload({
       object: 'whatsapp_business_account',
       entry: [
         {
@@ -297,14 +305,14 @@ describe('Webhook Status Progression & Idempotency', () => {
       ],
     });
 
-    msg = messageStore.getByProviderId(providerMsgId);
+    msg = await messageStore.getByProviderId(providerMsgId);
     assert.strictEqual(msg?.status, 'delivered');
-    summary = campaignStore.getSummary(campId);
+    summary = await campaignStore.getSummary(campId);
     assert.strictEqual(summary?.delivered, 1);
     assert.strictEqual(summary?.read, 0);
 
     // 3. Read webhook
-    WebhookService.processWebhookPayload({
+    await WebhookService.processWebhookPayload({
       object: 'whatsapp_business_account',
       entry: [
         {
@@ -330,18 +338,18 @@ describe('Webhook Status Progression & Idempotency', () => {
       ],
     });
 
-    msg = messageStore.getByProviderId(providerMsgId);
+    msg = await messageStore.getByProviderId(providerMsgId);
     assert.strictEqual(msg?.status, 'read');
-    summary = campaignStore.getSummary(campId);
+    summary = await campaignStore.getSummary(campId);
     assert.strictEqual(summary?.read, 1);
   });
 
-  test('Out-of-order webhook does not regress a higher status to a lower status', () => {
+  test('Out-of-order webhook does not regress a higher status to a lower status', async () => {
     // Set status to read
-    messageStore.updateStatus(internalMsgId, 'read', providerMsgId);
+    await messageStore.updateStatus(internalMsgId, 'read', providerMsgId);
 
     // Delayed 'delivered' webhook arrives
-    WebhookService.processWebhookPayload({
+    await WebhookService.processWebhookPayload({
       object: 'whatsapp_business_account',
       entry: [
         {
@@ -368,14 +376,14 @@ describe('Webhook Status Progression & Idempotency', () => {
     });
 
     // Message must REMAIN 'read'
-    const msg = messageStore.getByProviderId(providerMsgId);
+    const msg = await messageStore.getByProviderId(providerMsgId);
     assert.strictEqual(msg?.status, 'read');
   });
 
-  test('Duplicate webhook does not corrupt counters', () => {
+  test('Duplicate webhook does not corrupt counters', async () => {
     // Fire delivered 3 times
     for (let i = 0; i < 3; i++) {
-      WebhookService.processWebhookPayload({
+      await WebhookService.processWebhookPayload({
         object: 'whatsapp_business_account',
         entry: [
           {
@@ -402,7 +410,7 @@ describe('Webhook Status Progression & Idempotency', () => {
       });
     }
 
-    const summary = campaignStore.getSummary(campId);
+    const summary = await campaignStore.getSummary(campId);
     // Count must be exactly 1, not 3
     assert.strictEqual(summary?.delivered, 1);
   });
@@ -424,18 +432,18 @@ describe('Template Management, Parameter Mapping & Approval Gates', () => {
     assert.deepStrictEqual(vars, ['name', 'business_name', 'discount']);
   });
 
-  test('Pre-seeded hello_world template is approved and custom templates default to draft', () => {
-    const helloWorld = templateStore.get('tpl_hello_world');
+  test('Pre-seeded hello_world template is approved and custom templates default to draft', async () => {
+    const helloWorld = await templateStore.get('tpl_hello_world');
     assert.ok(helloWorld);
     assert.strictEqual(helloWorld.name, 'hello_world');
     assert.strictEqual(helloWorld.status, 'approved');
 
-    const birthdayOffer = templateStore.get('tpl_birthday');
+    const birthdayOffer = await templateStore.get('tpl_birthday');
     assert.ok(birthdayOffer);
     assert.strictEqual(birthdayOffer.name, 'birthday_offer');
     assert.strictEqual(birthdayOffer.status, 'draft');
 
-    const diwaliOffer = templateStore.get('tpl_diwali');
+    const diwaliOffer = await templateStore.get('tpl_diwali');
     assert.ok(diwaliOffer);
     assert.strictEqual(diwaliOffer.name, 'diwali_offer');
     assert.strictEqual(diwaliOffer.status, 'draft');
@@ -443,7 +451,7 @@ describe('Template Management, Parameter Mapping & Approval Gates', () => {
 
   test('Unapproved or draft templates are blocked from campaign dispatch', async () => {
     // 'tpl_vip_draft' is a draft template
-    const draftTpl = templateStore.get('tpl_vip_draft');
+    const draftTpl = await templateStore.get('tpl_vip_draft');
     assert.ok(draftTpl);
     assert.strictEqual(draftTpl.status, 'draft');
 
@@ -475,8 +483,8 @@ describe('Template Management, Parameter Mapping & Approval Gates', () => {
     assert.ok(result.error?.message?.includes('not connected to an approved WhatsApp template yet'));
   });
 
-  test('Template parameter validation catches missing required parameters', () => {
-    const tpl = templateStore.get('tpl_birthday');
+  test('Template parameter validation catches missing required parameters', async () => {
+    const tpl = await templateStore.get('tpl_birthday');
     assert.ok(tpl);
     const validation = TemplateService.validateTemplateParameters(tpl, {
       name: 'Nikhil',
@@ -487,8 +495,8 @@ describe('Template Management, Parameter Mapping & Approval Gates', () => {
     assert.ok(validation.missingVariables.includes('business_name'));
   });
 
-  test('Template parameter validation passes when all required variables are supplied', () => {
-    const tpl = templateStore.get('tpl_birthday');
+  test('Template parameter validation passes when all required variables are supplied', async () => {
+    const tpl = await templateStore.get('tpl_birthday');
     assert.ok(tpl);
     const validation = TemplateService.validateTemplateParameters(tpl, {
       name: 'Nikhil',
@@ -499,8 +507,8 @@ describe('Template Management, Parameter Mapping & Approval Gates', () => {
     assert.strictEqual(validation.missingVariables.length, 0);
   });
 
-  test('Template preview resolves placeholders correctly', () => {
-    const tpl = templateStore.get('tpl_birthday');
+  test('Template preview resolves placeholders correctly', async () => {
+    const tpl = await templateStore.get('tpl_birthday');
     assert.ok(tpl);
     const preview = TemplateService.resolvePreview(tpl, {
       name: 'Nikhil',
@@ -514,7 +522,7 @@ describe('Template Management, Parameter Mapping & Approval Gates', () => {
 
   test('Approved custom template with custom language is dispatched with exact name and language', async () => {
     // Register and approve a custom template with custom language
-    const customTpl = templateStore.create({
+    const customTpl = await templateStore.create({
       id: 'tpl_custom_festive',
       name: 'festive_radiance_custom',
       displayName: 'Festive Radiance Custom',

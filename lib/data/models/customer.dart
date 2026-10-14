@@ -3,6 +3,8 @@ class Customer {
   final String name;
   final String phone;
   final bool isOptedOut;
+  final bool hasWhatsAppConsent;
+  final DateTime? consentRecordedAt;
   final DateTime createdAt;
 
   Customer({
@@ -10,6 +12,8 @@ class Customer {
     required this.name,
     required this.phone,
     this.isOptedOut = false,
+    this.hasWhatsAppConsent = false,
+    this.consentRecordedAt,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -18,6 +22,8 @@ class Customer {
     'name': name,
     'phone': phone,
     'isOptedOut': isOptedOut,
+    'hasWhatsAppConsent': hasWhatsAppConsent,
+    'consentRecordedAt': consentRecordedAt?.toIso8601String(),
     'createdAt': createdAt.toIso8601String(),
   };
 
@@ -27,6 +33,10 @@ class Customer {
       name: json['name'] as String? ?? '',
       phone: json['phone'] as String? ?? '',
       isOptedOut: json['isOptedOut'] as bool? ?? false,
+      hasWhatsAppConsent: json['hasWhatsAppConsent'] as bool? ?? false,
+      consentRecordedAt: json['consentRecordedAt'] != null
+          ? DateTime.tryParse(json['consentRecordedAt'] as String)
+          : null,
       createdAt: json['createdAt'] != null
           ? DateTime.tryParse(json['createdAt'] as String) ?? DateTime.now()
           : DateTime.now(),
@@ -38,6 +48,8 @@ class Customer {
     String? name,
     String? phone,
     bool? isOptedOut,
+    bool? hasWhatsAppConsent,
+    DateTime? consentRecordedAt,
     DateTime? createdAt,
   }) {
     return Customer(
@@ -45,6 +57,8 @@ class Customer {
       name: name ?? this.name,
       phone: phone ?? this.phone,
       isOptedOut: isOptedOut ?? this.isOptedOut,
+      hasWhatsAppConsent: hasWhatsAppConsent ?? this.hasWhatsAppConsent,
+      consentRecordedAt: consentRecordedAt ?? this.consentRecordedAt,
       createdAt: createdAt ?? this.createdAt,
     );
   }

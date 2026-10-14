@@ -48,7 +48,7 @@ cp .env.example .env
 | `WHATSAPP_BUSINESS_ACCOUNT_ID` | Meta WABA ID | `1633948435034571` |
 | `TEST_WHATSAPP_DISPLAY_NUMBER`| Meta Test Number display | `+1 (555) 632-5494` |
 | `WHATSAPP_ACCESS_TOKEN` | Meta System User / Temp Token (SECRET) | *Must be provided in server env* |
-| `META_VERIFY_TOKEN` | Webhook verification token | `glowblast_webhook_verify_token` |
+| `META_VERIFY_TOKEN` / `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | Webhook verification token (both supported) | `glowblast_webhook_verify_token` |
 | `TEST_RECIPIENT_LIMIT` | Hard limit for test sends | `5` |
 | `TEST_RECIPIENTS` | Allowlist of authorized test numbers | `919876543210,919123456789` |
 
@@ -62,7 +62,7 @@ cp .env.example .env
 1. In **Meta for Developers Dashboard** -> **WhatsApp** -> **Configuration**.
 2. Click **Edit** under **Webhook**.
 3. **Callback URL:** `https://your-public-domain.com/api/webhook/whatsapp` (use ngrok or cloud domain).
-4. **Verify Token:** `glowblast_webhook_verify_token` (matches `META_VERIFY_TOKEN` in `.env`).
+4. **Verify Token:** `glowblast_webhook_verify_token` (matches `META_VERIFY_TOKEN` or `WHATSAPP_WEBHOOK_VERIFY_TOKEN` in `.env`).
 5. Click **Verify and Save**.
 6. Under Webhook fields, click **Manage** and subscribe to **`messages`**.
 

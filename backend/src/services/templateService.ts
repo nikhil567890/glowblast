@@ -22,17 +22,17 @@ export interface MetaTemplateSyncResult {
 
 export class TemplateService {
   /**
-   * Returns all templates from store.
+   * Returns templates from store optionally filtered by mode.
    */
-  public static listTemplates(): WhatsAppTemplate[] {
-    return templateStore.getAll();
+  public static async listTemplates(mode?: 'test' | 'production'): Promise<WhatsAppTemplate[]> {
+    return templateStore.getAll(mode);
   }
 
   /**
    * Retrieves a single template by ID or Meta name.
    */
-  public static getTemplate(idOrName: string): WhatsAppTemplate | undefined {
-    return templateStore.findByIdOrName(idOrName);
+  public static async getTemplate(idOrName: string, mode?: 'test' | 'production'): Promise<WhatsAppTemplate | undefined> {
+    return templateStore.findByIdOrName(idOrName, mode);
   }
 
   /**
@@ -217,7 +217,7 @@ export class TemplateService {
       updatedAt: now,
     };
 
-    templateStore.create(tpl);
+    await templateStore.create(tpl);
 
     return {
       success: true,
@@ -229,27 +229,36 @@ export class TemplateService {
   /**
    * Synchronizes templates from official Meta WhatsApp Business Platform.
    */
-  public static async syncFromMeta(): Promise<MetaTemplateSyncResult> {
-    if (!env.WHATSAPP_BUSINESS_ACCOUNT_ID || !env.WHATSAPP_ACCESS_TOKEN) {
+  public static async syncFromMeta(mode: 'test' | 'production' = 'test'): Promise<MetaTemplateSyncResult> {
+    const isProd = mode === 'production';
+    const targetWabaId = isProd
+      ? env.PROD_WHATSAPP_BUSINESS_ACCOUNT_ID
+      : env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+    const targetToken = isProd
+      ? env.PROD_WHATSAPP_ACCESS_TOKEN
+      : env.WHATSAPP_ACCESS_TOKEN;
+
+    if (!targetWabaId || !targetToken) {
+      const modeLabel = isProd ? 'Production' : 'Test Sandbox';
       return {
         success: false,
         syncedCount: 0,
-        templates: templateStore.getAll(),
+        templates: await templateStore.getAll(mode),
         error: {
           message:
-            'Meta WhatsApp Business credentials (WHATSAPP_BUSINESS_ACCOUNT_ID / WHATSAPP_ACCESS_TOKEN) are not configured.',
+            `Meta WhatsApp Business credentials for ${modeLabel} mode (WABA ID or Access Token) are not configured.`,
         },
       };
     }
 
-    const url = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}/${env.WHATSAPP_BUSINESS_ACCOUNT_ID}/message_templates?limit=100`;
+    const url = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}/${targetWabaId}/message_templates?limit=100`;
 
     try {
-      console.log(`[TemplateService] Fetching templates from Meta: WABA=${env.WHATSAPP_BUSINESS_ACCOUNT_ID}`);
+      console.log(`[TemplateService] Fetching templates from Meta: mode=${mode} WABA=${targetWabaId}`);
       const response = await fetch(url, {
         method: 'GET',
         headers: {
-          Authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}`,
+          Authorization: `Bearer ${targetToken}`,
         },
       });
 
@@ -261,7 +270,7 @@ export class TemplateService {
         return {
           success: false,
           syncedCount: 0,
-          templates: templateStore.getAll(),
+          templates: await templateStore.getAll(mode),
           error: {
             code: err.code || response.status,
             type: err.type || 'OAuthException',
@@ -293,13 +302,15 @@ export class TemplateService {
           localStatus = 'disabled';
         }
 
-        const existing = templateStore.getByName(metaName);
+        const existing = await templateStore.getByName(metaName, mode);
         if (existing) {
-          templateStore.update(existing.id, {
+          await templateStore.update(existing.id, {
             status: localStatus,
             metaStatus,
             metaTemplateId: metaId,
             language: metaLang,
+            wabaId: targetWabaId,
+            mode,
             lastSyncedAt: now,
           });
           syncedCount++;
@@ -313,14 +324,15 @@ export class TemplateService {
             }
           }
 
+          const templateIdPrefix = isProd ? 'tpl_prod_' : 'tpl_';
           const newTpl: WhatsAppTemplate = {
-            id: `tpl_${metaName}`,
+            id: `${templateIdPrefix}${metaName}`,
             name: metaName,
             displayName: metaName
               .split('_')
               .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
               .join(' '),
-            description: `Imported from Meta WhatsApp Business Platform (${metaStatus})`,
+            description: `Imported from Meta WhatsApp Business Platform (${metaStatus} - ${mode} WABA)`,
             category: metaCategory,
             language: metaLang,
             status: localStatus,
@@ -328,27 +340,29 @@ export class TemplateService {
             metaTemplateId: metaId,
             body: bodyText,
             variables: this.extractVariables(bodyText),
+            wabaId: targetWabaId,
+            mode,
             createdAt: now,
             updatedAt: now,
             lastSyncedAt: now,
           };
-          templateStore.create(newTpl);
+          await templateStore.create(newTpl);
           syncedCount++;
         }
       }
 
-      console.log(`[TemplateService] Successfully synced ${syncedCount} templates from Meta`);
+      console.log(`[TemplateService] Successfully synced ${syncedCount} templates from Meta (${mode})`);
       return {
         success: true,
         syncedCount,
-        templates: templateStore.getAll(),
+        templates: await templateStore.getAll(mode),
       };
     } catch (e: any) {
       console.error(`[TemplateService] Network error during Meta sync:`, e.message);
       return {
         success: false,
         syncedCount: 0,
-        templates: templateStore.getAll(),
+        templates: await templateStore.getAll(mode),
         error: {
           message: `Network error connecting to Meta WhatsApp Cloud API: ${e.message}`,
         },
@@ -359,18 +373,18 @@ export class TemplateService {
   /**
    * Sets the approval status of a template (e.g. admin sync or confirmation).
    */
-  public static updateStatus(
+  public static async updateStatus(
     id: string,
     status: TemplateApprovalStatus,
     metaStatus?: MetaTemplateStatus
-  ): WhatsAppTemplate | undefined {
+  ): Promise<WhatsAppTemplate | undefined> {
     return templateStore.updateStatus(id, status, metaStatus);
   }
 
   /**
    * Deletes a template.
    */
-  public static deleteTemplate(id: string): boolean {
+  public static async deleteTemplate(id: string): Promise<boolean> {
     return templateStore.delete(id);
   }
 }

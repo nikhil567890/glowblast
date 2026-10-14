@@ -48,7 +48,7 @@ router.post('/send', async (req: Request, res: Response) => {
   }
 
   // Check template mapping and approval
-  const template = templateStore.findByIdOrName(templateId || templateName);
+  const template = await templateStore.findByIdOrName(templateId || templateName);
   let effectiveMetaTemplateName = templateName;
   let effectiveLanguage = templateLanguage || 'en_US';
   let effectiveComponents = templateComponents;

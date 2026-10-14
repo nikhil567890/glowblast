@@ -18,6 +18,7 @@ class SendingSimulationScreen extends StatefulWidget {
   final String templateLanguage;
   final String? templateId;
   final List<String> templateVariables;
+  final String messagingMode; // 'demo', 'test', 'production'
 
   const SendingSimulationScreen({
     super.key,
@@ -27,12 +28,15 @@ class SendingSimulationScreen extends StatefulWidget {
     required this.messageContent,
     required this.selectedCustomers,
     this.isRealTest = false,
+    this.messagingMode = 'test',
     required this.templateName,
     this.templateLanguage = 'en_US',
     this.templateId,
     this.templateVariables = const [],
   });
 
+  bool get isProduction => messagingMode == 'production';
+  bool get isRealDispatch => isProduction || messagingMode == 'test' || isRealTest;
 
   @override
   State<SendingSimulationScreen> createState() => _SendingSimulationScreenState();
@@ -58,11 +62,15 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
   @override
   void initState() {
     super.initState();
-    // Strictly exclude any opted-out customers
-    final eligible = widget.selectedCustomers.where((c) => !c.isOptedOut).toList();
+    // Strictly exclude any opted-out customers, and enforce opt-in consent for production
+    final eligible = widget.selectedCustomers.where((c) {
+      if (c.isOptedOut) return false;
+      if (widget.isProduction && !c.hasWhatsAppConsent) return false;
+      return true;
+    }).toList();
     _totalToSend = eligible.length; // 1 customer = 1 message
 
-    if (widget.isRealTest) {
+    if (widget.isRealDispatch && widget.messagingMode != 'demo') {
       _startRealWhatsAppSending(eligible);
     } else {
       _startSimulation(eligible);
@@ -73,17 +81,21 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
   void _startRealWhatsAppSending(List<Customer> eligible) async {
     setState(() {
       _currentStep = 1;
-      _currentRecipientStatus = 'Validating recipients against authorized test allowlist...';
+      _currentRecipientStatus = widget.isProduction
+          ? 'Validating production recipients and opt-in consent...'
+          : 'Validating recipients against authorized test allowlist...';
     });
 
     final campaignId = 'GB-${DateTime.now().millisecondsSinceEpoch}';
 
-    // Convert eligible customers to backend payload
+    // Convert eligible customers to backend payload with consent flags
     final recipientsPayload = eligible.map((c) {
       return {
         'localCustomerId': c.id,
         'name': c.name,
         'phone': c.phone,
+        'hasConsent': c.hasWhatsAppConsent,
+        'consentRecordedAt': c.consentRecordedAt?.toIso8601String(),
       };
     }).toList();
 
@@ -99,6 +111,7 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
       recipients: recipientsPayload,
       optedOutPhones: widget.repository.optedOutCustomers.map((c) => c.phone).toList(),
       token: widget.repository.authToken,
+      mode: widget.isProduction ? 'production' : 'test',
     );
 
     if (!mounted) return;
@@ -122,10 +135,22 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
         final fields = err['fields'];
         if (code == 131031 || code == '131031') {
           msg = 'WhatsApp Business Account is restricted. Meta rejected this message.';
+        } else if (code == 'PRODUCTION_MODE_DISABLED') {
+          msg = 'Live production campaigns are disabled on the backend (ENABLE_PRODUCTION_CAMPAIGNS=false). Safe fail-closed protection active.';
+        } else if (code == 'UNAUTHORIZED_PRODUCTION_USER') {
+          msg = 'Your user account email is not authorized for live production broadcasts (PRODUCTION_ALLOWED_EMAILS).';
+        } else if (code == 'DAILY_RECIPIENT_LIMIT_EXCEEDED') {
+          msg = errText ?? 'Daily 24-hour production recipient limit exceeded (max 200 unique recipients).';
+        } else if (code == 'NO_ELIGIBLE_CONSENTED_RECIPIENTS') {
+          msg = 'No eligible consented recipients found. In compliance with WhatsApp policies, live broadcasts require documented customer opt-in.';
+        } else if (code == 'INVALID_PRODUCTION_TEMPLATE') {
+          msg = 'The test-only hello_world fixture cannot be used for production campaigns. Please choose an approved production template.';
+        } else if (code == 'PRODUCTION_CREDENTIALS_MISSING') {
+          msg = 'Production WhatsApp Cloud API credentials are not configured on Render.';
         } else if (code == 'TEST_RECIPIENT_LIMIT') {
           msg = errText ?? 'WhatsApp Test Mode allows up to 5 authorized recipients.';
         } else if (code == 'TEMPLATE_NOT_APPROVED') {
-          msg = errText ?? 'This GlowBlast template is not connected to an approved WhatsApp template yet.';
+          msg = errText ?? 'This template is not approved for WhatsApp broadcast.';
         } else if (code == 'VALIDATION_ERROR' && fields is List && fields.isNotEmpty) {
           msg = 'Invalid campaign data: ${fields.join(', ')}';
         } else {
@@ -262,7 +287,8 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
         failed: _failedCount > 0 ? _failedCount : eligible.length,
         replied: 0,
         status: 'Failed',
-        isRealTest: true,
+        isRealTest: !widget.isProduction && (widget.isRealTest || widget.messagingMode == 'test'),
+        mode: widget.isProduction ? 'production' : (widget.messagingMode == 'test' ? 'test' : 'demo'),
         backendCampaignId: campaignId,
         templateName: widget.templateName,
       );
@@ -275,7 +301,7 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
       if (!mounted) return;
       setState(() {
         _hasError = true;
-        _errorMessage = 'Message not sent.\n\n$failureReason\n\nAction: Add recipient phone numbers in Meta App Dashboard > WhatsApp > API Setup > To.';
+        _errorMessage = 'Message not sent.\n\n$failureReason\n\nAction: Ensure recipient phone numbers are eligible and authorized.';
       });
       return;
     }
@@ -304,7 +330,8 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
       failed: _failedCount,
       replied: 0,
       status: appCampaignStatus,
-      isRealTest: true,
+      isRealTest: !widget.isProduction && (widget.isRealTest || widget.messagingMode == 'test'),
+      mode: widget.isProduction ? 'production' : (widget.messagingMode == 'test' ? 'test' : 'demo'),
       backendCampaignId: campaignId,
       templateName: widget.templateName,
     );
@@ -431,9 +458,11 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
         child: Column(
           children: [
             DemoRibbon(
-              label: widget.isRealTest
-                  ? 'META CLOUD API • REAL WHATSAPP TEST DISPATCH'
-                  : 'DISPATCHING SIMULATION • WHATSAPP ONLY',
+              label: widget.isProduction
+                  ? 'META CLOUD API • LIVE PRODUCTION BROADCAST (+91 95022 59203)'
+                  : (widget.isRealDispatch && widget.messagingMode != 'demo'
+                      ? 'META CLOUD API • REAL WHATSAPP TEST DISPATCH'
+                      : 'DISPATCHING SIMULATION • WHATSAPP ONLY'),
             ),
             Expanded(
               child: Center(

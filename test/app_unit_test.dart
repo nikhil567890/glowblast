@@ -2,6 +2,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:glowblast/services/excel_service.dart';
 import 'package:glowblast/data/models/settings_model.dart';
+import 'package:glowblast/data/models/customer.dart';
 import 'package:glowblast/data/models/campaign.dart';
 import 'package:glowblast/data/models/whatsapp_template.dart';
 import 'package:glowblast/data/repositories/app_repository.dart';
@@ -389,6 +390,110 @@ void main() {
       expect(revived.canSend, isTrue);
       expect(revived.metaTemplateId, 'meta_123');
       expect(revived.variables, ['name']);
+    });
+  });
+
+  group('Three-Mode Messaging & Opt-In Consent Tests', () {
+    test('Customer model defaults to hasWhatsAppConsent = false', () {
+      final customer = Customer(
+        id: 'cust_sample_1',
+        name: 'Demo Client',
+        phone: '+91 98765 43210',
+      );
+
+      expect(customer.hasWhatsAppConsent, isFalse);
+      expect(customer.consentRecordedAt, isNull);
+    });
+
+    test('Customer model serializes and deserializes consent metadata correctly', () {
+      final consentedDate = DateTime.parse('2026-10-12T14:30:00.000Z');
+      final customer = Customer(
+        id: 'cust_consented_1',
+        name: 'Pooja',
+        phone: '+91 95022 59203',
+        hasWhatsAppConsent: true,
+        consentRecordedAt: consentedDate,
+      );
+
+      final json = customer.toJson();
+      final restored = Customer.fromJson(json);
+
+      expect(restored.hasWhatsAppConsent, isTrue);
+      expect(restored.consentRecordedAt, consentedDate);
+    });
+
+    test('AppSettings handles Demo, Developer Test, and Live Production modes', () {
+      final demoSettings = AppSettings(messagingMode: 'demo');
+      expect(demoSettings.isDemoMode, isTrue);
+      expect(demoSettings.isWhatsAppTestMode, isFalse);
+      expect(demoSettings.isWhatsAppProductionMode, isFalse);
+      expect(demoSettings.isRealWhatsAppMode, isFalse);
+
+      final testSettings = AppSettings(messagingMode: 'testMode');
+      expect(testSettings.isDemoMode, isFalse);
+      expect(testSettings.isWhatsAppTestMode, isTrue);
+      expect(testSettings.isWhatsAppProductionMode, isFalse);
+      expect(testSettings.isRealWhatsAppMode, isTrue);
+
+      final prodSettings = AppSettings(messagingMode: 'production');
+      expect(prodSettings.isDemoMode, isFalse);
+      expect(prodSettings.isWhatsAppTestMode, isFalse);
+      expect(prodSettings.isWhatsAppProductionMode, isTrue);
+      expect(prodSettings.isRealWhatsAppMode, isTrue);
+    });
+
+    test('WhatsAppTemplate separates test and production mode templates', () {
+      final testTemplate = WhatsAppTemplate(
+        id: 'tpl_hello',
+        name: 'hello_world',
+        displayName: 'Hello World Fixture',
+        status: 'approved',
+        body: 'Hello World',
+        mode: 'test',
+      );
+
+      final prodTemplate = WhatsAppTemplate(
+        id: 'tpl_prod_1',
+        name: 'monsoon_glow_offer',
+        displayName: 'Monsoon Glow Offer',
+        status: 'approved',
+        body: 'Hi {name}, enjoy our monsoon glow offer!',
+        mode: 'production',
+        wabaId: '3226959717495309',
+      );
+
+      expect(testTemplate.isTest, isTrue);
+      expect(testTemplate.isProduction, isFalse);
+
+      expect(prodTemplate.isProduction, isTrue);
+      expect(prodTemplate.wabaId, '3226959717495309');
+    });
+
+    test('Campaign model retains explicit mode attribute', () {
+      final campaign = Campaign(
+        id: 'camp_live_1',
+        name: 'Live Diwali Broadcast',
+        month: 'Oct',
+        date: DateTime.now(),
+        channel: 'WhatsApp',
+        targetAudience: 'Consented VIPs',
+        messageContent: 'Happy Diwali!',
+        recipients: 10,
+        messagesSent: 10,
+        delivered: 9,
+        read: 7,
+        failed: 1,
+        replied: 2,
+        mode: 'production',
+      );
+
+      expect(campaign.mode, 'production');
+      expect(campaign.isProduction, isTrue);
+
+      final json = campaign.toJson();
+      final restored = Campaign.fromJson(json);
+      expect(restored.mode, 'production');
+      expect(restored.isProduction, isTrue);
     });
   });
 }

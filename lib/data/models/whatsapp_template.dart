@@ -11,6 +11,8 @@ class WhatsAppTemplate {
   final String body; // Text with {name}, {business_name}
   final List<String> variables;
   final Map<String, String>? exampleValues;
+  final String mode; // 'test' | 'production' | 'all'
+  final String? wabaId;
   final DateTime createdAt;
   final DateTime updatedAt;
   final DateTime? lastSyncedAt;
@@ -28,6 +30,8 @@ class WhatsAppTemplate {
     required this.body,
     this.variables = const [],
     this.exampleValues,
+    this.mode = 'test',
+    this.wabaId,
     DateTime? createdAt,
     DateTime? updatedAt,
     this.lastSyncedAt,
@@ -93,6 +97,9 @@ class WhatsAppTemplate {
     return metaBody;
   }
 
+  bool get isProduction => mode == 'production';
+  bool get isTest => mode == 'test' || mode == 'all';
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
@@ -106,6 +113,8 @@ class WhatsAppTemplate {
         'body': body,
         'variables': variables,
         'exampleValues': exampleValues,
+        'mode': mode,
+        'wabaId': wabaId,
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
         'lastSyncedAt': lastSyncedAt?.toIso8601String(),
@@ -127,6 +136,8 @@ class WhatsAppTemplate {
       exampleValues: (json['exampleValues'] as Map<String, dynamic>?)?.map(
         (k, v) => MapEntry(k, v.toString()),
       ),
+      mode: json['mode'] as String? ?? 'test',
+      wabaId: json['wabaId'] as String?,
       createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
       updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? DateTime.now(),
       lastSyncedAt: json['lastSyncedAt'] != null
@@ -148,6 +159,8 @@ class WhatsAppTemplate {
     String? body,
     List<String>? variables,
     Map<String, String>? exampleValues,
+    String? mode,
+    String? wabaId,
     DateTime? createdAt,
     DateTime? updatedAt,
     DateTime? lastSyncedAt,
@@ -165,6 +178,8 @@ class WhatsAppTemplate {
       body: body ?? this.body,
       variables: variables ?? this.variables,
       exampleValues: exampleValues ?? this.exampleValues,
+      mode: mode ?? this.mode,
+      wabaId: wabaId ?? this.wabaId,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       lastSyncedAt: lastSyncedAt ?? this.lastSyncedAt,

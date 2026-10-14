@@ -7,7 +7,7 @@ class AppSettings {
   final bool isWhatsAppConnected;
   final int whatsAppCredits;
   final String themeMode; // 'system', 'light', 'dark'
-  final String messagingMode; // 'demo' or 'testMode'
+  final String messagingMode; // 'demo', 'testMode', 'production'
   final String backendUrl; // URL of the GlowBlast backend
 
   AppSettings({
@@ -26,7 +26,10 @@ class AppSettings {
       businessName.trim().isNotEmpty &&
       phone.trim().isNotEmpty;
 
+  bool get isDemoMode => messagingMode == 'demo';
   bool get isWhatsAppTestMode => messagingMode == 'testMode';
+  bool get isWhatsAppProductionMode => messagingMode == 'production';
+  bool get isRealWhatsAppMode => isWhatsAppTestMode || isWhatsAppProductionMode;
 
   // Convenient alias for personalization
   String get spaName => businessName;

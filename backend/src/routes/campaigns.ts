@@ -4,6 +4,7 @@ import { env } from '../config/env';
 import { campaignSendSchema } from '../utils/validation';
 import { CampaignService } from '../services/campaignService';
 import { campaignStore } from '../store/campaignStore';
+import { userStore } from '../store/userStore';
 import { realtimeService } from '../services/realtimeService';
 
 const router = Router();
@@ -19,6 +20,7 @@ router.post('/send', async (req: Request, res: Response) => {
   const authHeaderPresent = !!(authHeader && authHeader.startsWith('Bearer '));
   let authValid = false;
   let userId = 'unauthenticated';
+  let userEmail: string | undefined = undefined;
 
   if (authHeaderPresent && authHeader) {
     const token = authHeader.substring(7).trim();
@@ -26,6 +28,16 @@ router.post('/send', async (req: Request, res: Response) => {
       const decoded = jwt.verify(token, env.JWT_SECRET) as { sub?: string; email?: string; id?: string };
       authValid = true;
       userId = decoded.sub || decoded.id || decoded.email || 'authenticated_user';
+
+      // Authoritative email derivation: strictly from verified server-side authentication identity
+      const serverUser = decoded.sub ? await userStore.findById(decoded.sub) : undefined;
+      if (serverUser && serverUser.email) {
+        userEmail = serverUser.email.trim().toLowerCase();
+      } else if (decoded.email && typeof decoded.email === 'string') {
+        userEmail = decoded.email.trim().toLowerCase();
+      } else if (decoded.sub && decoded.sub.includes('@')) {
+        userEmail = decoded.sub.trim().toLowerCase();
+      }
     } catch (_) {
       authValid = false;
     }
@@ -51,13 +63,15 @@ router.post('/send', async (req: Request, res: Response) => {
   const recipientsCount = Array.isArray(req.body?.recipients) ? req.body.recipients.length : 0;
   const reqTemplateName = typeof req.body?.templateName === 'string' ? req.body.templateName : 'unknown';
   const reqTemplateLanguage = typeof req.body?.templateLanguage === 'string' ? req.body.templateLanguage : 'en_US';
+  const reqMode = typeof req.body?.mode === 'string' ? req.body.mode : 'test';
 
   console.log(
     `[Campaign] Send request received\n` +
     `payloadKeys=${JSON.stringify(payloadKeys)}\n` +
     `recipientsCount=${recipientsCount}\n` +
     `templateName=${reqTemplateName}\n` +
-    `templateLanguage=${reqTemplateLanguage}`
+    `templateLanguage=${reqTemplateLanguage}\n` +
+    `mode=${reqMode}`
   );
 
   // 3. Schema Validation
@@ -85,12 +99,16 @@ router.post('/send', async (req: Request, res: Response) => {
   const result = await CampaignService.dispatchCampaign({
     ...parsed.data,
     campaignId: parsed.data.campaignId || `GB-${Date.now()}`,
+    clientRequestToken: parsed.data.clientRequestToken || undefined,
     templateLanguage: parsed.data.templateLanguage || 'en_US',
     templateComponents: (parsed.data.templateComponents ?? undefined) as any,
+    userEmail,
     recipients: parsed.data.recipients.map((r, idx) => ({
       localCustomerId: r.localCustomerId || `cust_${idx + 1}`,
       name: r.name || 'Valued Customer',
       phone: r.phone,
+      hasConsent: r.hasConsent ?? false,
+      consentRecordedAt: r.consentRecordedAt || undefined,
     })),
   });
 
@@ -121,10 +139,10 @@ router.post('/send', async (req: Request, res: Response) => {
  * GET /api/campaigns/:campaignId
  * Returns the current authoritative campaign state.
  */
-router.get('/:campaignId', (req: Request, res: Response) => {
+router.get('/:campaignId', async (req: Request, res: Response) => {
   const { campaignId } = req.params;
-  const summary = campaignStore.getSummary(campaignId);
-  const camp = campaignStore.get(campaignId);
+  const summary = await campaignStore.getSummary(campaignId);
+  const camp = await campaignStore.get(campaignId);
 
   if (!summary || !camp) {
     res.status(404).json({
@@ -151,9 +169,9 @@ router.get('/:campaignId', (req: Request, res: Response) => {
  * Returns authoritative campaign status counters and processing state.
  * Implements canonical schema expected by Flutter client.
  */
-router.get('/:campaignId/status', (req: Request, res: Response) => {
+router.get('/:campaignId/status', async (req: Request, res: Response) => {
   const { campaignId } = req.params;
-  const summary = campaignStore.getSummary(campaignId);
+  const summary = await campaignStore.getSummary(campaignId);
 
   if (!summary) {
     res.status(404).json({

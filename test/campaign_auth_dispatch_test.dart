@@ -252,5 +252,74 @@ void main() {
       expect(tester!.isOptedOut, false);
       expect(tester.name, 'Authorized Meta Tester');
     });
+
+    test('9. sendCampaign passes mode and recipient consent metadata', () async {
+      Map<String, dynamic>? capturedBody;
+
+      final mockClient = MockClient((request) async {
+        capturedBody = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response(jsonEncode({'success': true}), 202);
+      });
+
+      final client = GlowBlastBackendClient(
+        baseUrl: 'https://glowblast-api.onrender.com',
+        httpClient: mockClient,
+      );
+
+      await client.sendCampaign(
+        campaignId: 'GB-PROD-TEST-1',
+        campaignName: 'Live Production Campaign',
+        templateName: 'monsoon_glow_offer',
+        templateLanguage: 'en_US',
+        mode: 'production',
+        recipients: [
+          {
+            'localCustomerId': 'c_opted_in',
+            'name': 'Consented Client',
+            'phone': '+919502259203',
+            'hasConsent': true,
+            'consentRecordedAt': '2026-10-12T10:00:00.000Z',
+          },
+        ],
+      );
+
+      expect(capturedBody?['mode'], 'production');
+      expect(capturedBody?['campaignName'], 'Live Production Campaign');
+      final rec = (capturedBody?['recipients'] as List).first as Map<String, dynamic>;
+      expect(rec['hasConsent'], true);
+      expect(rec['phone'], '+919502259203');
+    });
+
+    test('10. Backend production rejection error codes are cleanly parsed', () async {
+      final mockClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({
+            'success': false,
+            'error': {
+              'code': 'PRODUCTION_MODE_DISABLED',
+              'message': 'Production campaigns are currently disabled on the backend',
+            },
+          }),
+          403,
+        );
+      });
+
+      final client = GlowBlastBackendClient(
+        baseUrl: 'https://glowblast-api.onrender.com',
+        httpClient: mockClient,
+      );
+
+      final res = await client.sendCampaign(
+        campaignId: 'GB-PROD-TEST-2',
+        campaignName: 'Kill Switch Test',
+        templateName: 'monsoon_offer',
+        mode: 'production',
+        recipients: [{'phone': '+919502259203', 'hasConsent': true}],
+      );
+
+      expect(res['success'], false);
+      expect(res['statusCode'], 403);
+      expect(res['error']['code'], 'PRODUCTION_MODE_DISABLED');
+    });
   });
 }

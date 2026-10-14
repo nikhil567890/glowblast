@@ -10,9 +10,12 @@ export type CampaignStatus =
   | 'cancelled';
 
 export interface CampaignSendRequest {
+  clientRequestToken?: string | null;
   campaignId?: string | null;
   businessName?: string | null;
   campaignName: string;
+  mode?: 'demo' | 'test' | 'production' | null;
+  userEmail?: string | null;
   templateId?: string | null;
   templateName: string;
   templateLanguage?: string | null;
@@ -29,6 +32,8 @@ export interface CampaignSendRequest {
     localCustomerId?: string | null;
     name?: string | null;
     phone: string;
+    hasConsent?: boolean | null;
+    consentRecordedAt?: string | null;
   }>;
   optedOutPhones?: string[] | null;
   metadata?: Record<string, any> | null;
@@ -36,6 +41,7 @@ export interface CampaignSendRequest {
 
 export interface CampaignSummary {
   campaignId: string;
+  clientRequestToken?: string;
   campaignName: string;
   status: CampaignStatus;
   templateName?: string;

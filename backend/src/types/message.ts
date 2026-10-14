@@ -6,7 +6,8 @@ export type MessageStatus =
   | 'delivered'
   | 'read'
   | 'failed'
-  | 'excluded_opt_out';
+  | 'excluded_opt_out'
+  | 'uncertain_timeout';
 
 export interface RecipientInput {
   localCustomerId: string;

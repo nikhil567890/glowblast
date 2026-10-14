@@ -28,13 +28,15 @@ const updateStatusSchema = z.object({
 
 /**
  * GET /api/templates
- * Lists all WhatsApp templates.
+ * Lists all WhatsApp templates (optionally filtered by ?mode=test|production).
  */
-router.get('/', (_req: Request, res: Response) => {
-  const templates = TemplateService.listTemplates();
+router.get('/', async (req: Request, res: Response) => {
+  const mode = req.query.mode === 'production' ? 'production' : req.query.mode === 'test' ? 'test' : undefined;
+  const templates = await TemplateService.listTemplates(mode);
   res.json({
     success: true,
     count: templates.length,
+    mode: mode || 'all',
     templates,
   });
 });
@@ -43,8 +45,9 @@ router.get('/', (_req: Request, res: Response) => {
  * GET /api/templates/:id
  * Retrieves a single template by ID or Meta name.
  */
-router.get('/:id', (req: Request, res: Response) => {
-  const template = TemplateService.getTemplate(req.params.id);
+router.get('/:id', async (req: Request, res: Response) => {
+  const mode = req.query.mode === 'production' ? 'production' : req.query.mode === 'test' ? 'test' : undefined;
+  const template = await TemplateService.getTemplate(req.params.id, mode);
   if (!template) {
     res.status(404).json({
       success: false,
@@ -89,12 +92,15 @@ router.post('/', async (req: Request, res: Response) => {
 
 /**
  * POST /api/templates/sync
- * Synchronizes templates with official Meta WhatsApp Cloud API / WABA account.
+ * Synchronizes templates with official Meta WhatsApp Cloud API / WABA account (?mode=test|production).
  */
-router.post('/sync', async (_req: Request, res: Response) => {
-  const result = await TemplateService.syncFromMeta();
+router.post('/sync', async (req: Request, res: Response) => {
+  const rawMode = req.query.mode || req.body?.mode;
+  const mode = rawMode === 'production' ? 'production' : 'test';
+  const result = await TemplateService.syncFromMeta(mode);
   res.json({
     success: result.success,
+    mode,
     syncedCount: result.syncedCount,
     templates: result.templates,
     error: result.error,
@@ -105,7 +111,7 @@ router.post('/sync', async (_req: Request, res: Response) => {
  * PUT /api/templates/:id/status
  * Updates template approval status (e.g. manual import / confirmation).
  */
-router.put('/:id/status', (req: Request, res: Response) => {
+router.put('/:id/status', async (req: Request, res: Response) => {
   const parsed = updateStatusSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({
@@ -119,7 +125,7 @@ router.put('/:id/status', (req: Request, res: Response) => {
     return;
   }
 
-  const updated = TemplateService.updateStatus(
+  const updated = await TemplateService.updateStatus(
     req.params.id,
     parsed.data.status,
     parsed.data.metaStatus
@@ -146,8 +152,8 @@ router.put('/:id/status', (req: Request, res: Response) => {
  * DELETE /api/templates/:id
  * Removes a template from local store.
  */
-router.delete('/:id', (req: Request, res: Response) => {
-  const deleted = TemplateService.deleteTemplate(req.params.id);
+router.delete('/:id', async (req: Request, res: Response) => {
+  const deleted = await TemplateService.deleteTemplate(req.params.id);
   if (!deleted) {
     res.status(404).json({
       success: false,

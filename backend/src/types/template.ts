@@ -28,6 +28,8 @@ export interface WhatsAppTemplate {
   body: string; // Text containing variables like {name}, {business_name}
   variables: string[]; // ['name', 'business_name']
   exampleValues?: Record<string, string>;
+  wabaId?: string; // Originating WABA ID
+  mode?: 'test' | 'production'; // Target environment mode
   createdAt: string;
   updatedAt: string;
   lastSyncedAt?: string;

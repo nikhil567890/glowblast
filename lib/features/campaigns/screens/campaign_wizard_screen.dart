@@ -153,6 +153,120 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
     );
   }
 
+  Future<bool> _showProductionConfirmationDialog({
+    required int consentedCount,
+    required int excludedCount,
+    required String templateName,
+    required String language,
+  }) async {
+    return await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: AppColors.whatsApp, size: 28),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Confirm Live Broadcast',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.whatsApp.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: AppColors.whatsApp.withValues(alpha: 0.3)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'PRODUCTION MODE ACTIVE',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppColors.whatsApp),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Sender: +91 95022 59203 (Official Registered Number)\n'
+                      'Template: $templateName ($language)\n'
+                      'Recipients: $consentedCount eligible consented customer(s)',
+                      style: const TextStyle(fontSize: 13, height: 1.4, fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ),
+              ),
+              if (excludedCount > 0) ...[
+                const SizedBox(height: 12),
+                Text(
+                  '• $excludedCount customer(s) excluded (missing WhatsApp opt-in consent or opted out).',
+                  style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
+                ),
+              ],
+              const SizedBox(height: 12),
+              const Text(
+                'This will deliver real WhatsApp messages via Meta Cloud API to the eligible consented recipients. Are you sure you want to proceed?',
+                style: TextStyle(fontSize: 13, height: 1.35),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.whatsApp,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Confirm & Broadcast Live'),
+            ),
+          ],
+        );
+      },
+    ) ?? false;
+  }
+
+  void _showNoConsentedRecipientsDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.shield_outlined, color: AppColors.error, size: 26),
+            SizedBox(width: 10),
+            Expanded(child: Text('No Consented Recipients', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+          ],
+        ),
+        content: const Text(
+          'None of the selected customers have a recorded WhatsApp opt-in consent record.\n\n'
+          'In compliance with WhatsApp policies, live production broadcasts require explicit customer consent.\n\n'
+          'Sample and demo customers are strictly excluded from production broadcasts.',
+          style: TextStyle(fontSize: 13.5, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _submitCampaign() async {
     final recipients = _calculateSelectedRecipients();
     if (recipients.isEmpty) {
@@ -164,7 +278,7 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
 
     final settings = widget.repository.settings;
 
-    // In WhatsApp mode, enforce approved template requirement
+    // Mode-specific template & recipient validation
     if (settings.isWhatsAppTestMode) {
       if (_selectedTemplate == null || !_selectedTemplate!.canSend) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -179,16 +293,34 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
         );
         return;
       }
-    }
-
-    if (settings.isWhatsAppTestMode && recipients.length > 5) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('WhatsApp Test Mode allows up to 5 authorized recipients.'),
-          backgroundColor: AppColors.error,
-        ),
-      );
-      return;
+      if (recipients.length > 5) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('WhatsApp Test Mode allows up to 5 authorized recipients.'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+        return;
+      }
+    } else if (settings.isWhatsAppProductionMode) {
+      if (_selectedTemplate == null || !_selectedTemplate!.canSend) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please select an approved production WhatsApp template.'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+        return;
+      }
+      if (_selectedTemplate!.metaTemplateName.toLowerCase() == 'hello_world') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('The public test-only hello_world template is prohibited for production campaigns.'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+        return;
+      }
     }
 
     if (_messageController.text.trim().isEmpty) {
@@ -197,6 +329,33 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
       );
       return;
     }
+
+    // Customer consent filtering for production mode
+    List<Customer> targetRecipients = recipients;
+    if (settings.isWhatsAppProductionMode) {
+      final consented = recipients.where((c) => !c.isOptedOut && c.hasWhatsAppConsent).toList();
+      final excludedCount = recipients.length - consented.length;
+      if (consented.isEmpty) {
+        _showNoConsentedRecipientsDialog();
+        return;
+      }
+      targetRecipients = consented;
+
+      // Show confirmation dialog before sending
+      if (_isSendNow) {
+        final confirmed = await _showProductionConfirmationDialog(
+          consentedCount: consented.length,
+          excludedCount: excludedCount,
+          templateName: _selectedTemplate!.metaTemplateName,
+          language: _selectedTemplate!.metaLanguage,
+        );
+        if (!confirmed || !mounted) return;
+      }
+    }
+
+    final String messagingMode = settings.isWhatsAppProductionMode
+        ? 'production'
+        : (settings.isWhatsAppTestMode ? 'test' : 'demo');
 
     if (_isSendNow) {
       // Navigate to simulation / real send screen with exact selected template
@@ -207,8 +366,9 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
             campaignName: _campaignNameController.text.trim(),
             targetAudience: _getAudienceDisplayLabel(),
             messageContent: _messageController.text.trim(),
-            selectedCustomers: recipients,
+            selectedCustomers: targetRecipients,
             isRealTest: settings.isWhatsAppTestMode,
+            messagingMode: messagingMode,
             templateId: _selectedTemplate!.id,
             templateName: _selectedTemplate!.metaTemplateName,
             templateLanguage: _selectedTemplate!.metaLanguage,
@@ -1236,9 +1396,23 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
               ),
               if (settings.isWhatsAppTestMode) ...[
                 const SizedBox(height: 8),
-                _buildReviewRow('Mode', 'WhatsApp Test Mode (Real API)', isSuccess: true),
+                _buildReviewRow('Mode', 'Developer Test (Sandbox API)', isSuccess: true),
                 const SizedBox(height: 8),
-                _buildReviewRow('Test Display Number', '+1 (555) 632-5494'),
+                _buildReviewRow('Sandbox Sender', '+1 (555) 632-5494'),
+              ] else if (settings.isWhatsAppProductionMode) ...[
+                const SizedBox(height: 8),
+                _buildReviewRow('Mode', 'Live Production (Cloud API)', isSuccess: true),
+                const SizedBox(height: 8),
+                _buildReviewRow('Production Sender', '+91 95022 59203'),
+                const SizedBox(height: 8),
+                _buildReviewRow(
+                  'Consented Recipients',
+                  '${recipients.where((c) => c.hasWhatsAppConsent && !c.isOptedOut).length} of $totalCount',
+                  isSuccess: recipients.any((c) => c.hasWhatsAppConsent && !c.isOptedOut),
+                ),
+              ] else ...[
+                const SizedBox(height: 8),
+                _buildReviewRow('Mode', 'Demo Mode (Simulated)', isSuccess: false),
               ],
             ],
           ),
@@ -1271,6 +1445,83 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
                 ),
               ],
             ),
+          ),
+        ],
+
+        if (settings.isWhatsAppProductionMode) ...[
+          const SizedBox(height: 14),
+          Builder(
+            builder: (context) {
+              final consented = recipients.where((c) => c.hasWhatsAppConsent && !c.isOptedOut).length;
+              final excluded = totalCount - consented;
+              final isHelloWorld = _selectedTemplate?.metaTemplateName.toLowerCase() == 'hello_world';
+
+              return Column(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: consented > 0
+                          ? AppColors.primarySageContainer.withValues(alpha: 0.6)
+                          : const Color(0xFFFEECEB),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: consented > 0
+                            ? AppColors.primarySage.withValues(alpha: 0.4)
+                            : AppColors.error.withValues(alpha: 0.3),
+                      ),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          consented > 0 ? Icons.verified_user_rounded : Icons.gpp_bad_rounded,
+                          color: consented > 0 ? AppColors.primarySageDark : AppColors.error,
+                          size: 22,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            consented > 0
+                                ? 'Production Consent Verified: $consented eligible consented recipient(s) will be contacted via +91 95022 59203 ($excluded excluded due to missing opt-in consent or opt-outs).'
+                                : 'No Consented Recipients: None of the selected recipients have recorded WhatsApp opt-in consent. In compliance with Meta WhatsApp policies, production sending requires recorded opt-in consent.',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: consented > 0 ? AppColors.primarySageDark : AppColors.error,
+                              height: 1.35,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (isHelloWorld) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFEECEB),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.error.withValues(alpha: 0.3)),
+                      ),
+                      child: const Row(
+                        children: [
+                          Icon(Icons.block_rounded, color: AppColors.error, size: 22),
+                          SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'BLOCKED: The hello_world fixture cannot be used for production campaigns. Please choose an approved production template.',
+                              style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: AppColors.error),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              );
+            },
           ),
         ],
 

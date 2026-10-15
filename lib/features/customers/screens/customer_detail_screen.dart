@@ -68,14 +68,13 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
     String initialCategory = 'marketing',
     String initialStatus = 'opted_in',
   }) async {
-    String selectedCategory = initialCategory;
     String selectedStatus = initialStatus;
     final sourceController = TextEditingController(text: 'Front Desk Digital Tablet');
     final evidenceController = TextEditingController(
-      text: selectedCategory == 'marketing' ? 'Intake Form #${customer.id.split('_').last}' : 'Appointment Booking #${customer.id.split('_').last}',
+      text: 'Intake Form #${customer.id.split('_').last}',
     );
     final textVersionController = TextEditingController(
-      text: selectedCategory == 'marketing' ? 'v2026.1_promotional' : 'v2026.1_appointment_updates',
+      text: 'v2026.1_promotional',
     );
     bool isSubmitting = false;
 
@@ -98,7 +97,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    selectedStatus == 'opted_in' ? 'Record WhatsApp Consent' : 'Record Opt-Out / Revocation',
+                    selectedStatus == 'opted_in' ? 'Record Marketing Consent' : 'Record Opt-Out / Revocation',
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                   ),
                 ),
@@ -120,46 +119,6 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                       ),
                     ),
                     const SizedBox(height: 14),
-
-                    // Consent Category (Marketing vs Utility)
-                    const Text('Consent Category', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ChoiceChip(
-                            label: const Text('Marketing', style: TextStyle(fontSize: 12)),
-                            selected: selectedCategory == 'marketing',
-                            selectedColor: AppColors.primarySageContainer,
-                            onSelected: (val) {
-                              if (val) {
-                                setDialogState(() {
-                                  selectedCategory = 'marketing';
-                                  textVersionController.text = 'v2026.1_promotional';
-                                });
-                              }
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: ChoiceChip(
-                            label: const Text('Utility / Updates', style: TextStyle(fontSize: 12)),
-                            selected: selectedCategory == 'utility',
-                            selectedColor: const Color(0xFFE1F5FE),
-                            onSelected: (val) {
-                              if (val) {
-                                setDialogState(() {
-                                  selectedCategory = 'utility';
-                                  textVersionController.text = 'v2026.1_appointment_updates';
-                                });
-                              }
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
 
                     // Status (Opt-In vs Opt-Out vs Revoked)
                     const Text('Status Action', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
@@ -275,7 +234,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                         setDialogState(() => isSubmitting = true);
                         final result = await widget.repository.recordCustomerConsent(
                           customerId: customer.id,
-                          category: selectedCategory,
+                          category: 'marketing',
                           status: selectedStatus,
                           source: sourceController.text.trim(),
                           evidence: evidenceController.text.trim(),
@@ -283,17 +242,24 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                           allowOptOutOverride: true,
                         );
 
+                        if (!mounted) {
+                          return;
+                        }
                         dialogNav.pop();
-                        if (!mounted) return;
                         setState(() {});
 
                         final isSuccess = result['success'] == true;
+                        if (!isSuccess) {
+                          // Reload authoritative state from server
+                          await widget.repository.syncConsentsFromBackend();
+                          if (mounted) setState(() {});
+                        }
                         messenger.showSnackBar(
                           SnackBar(
                             backgroundColor: isSuccess ? AppColors.whatsApp : AppColors.error,
                             content: Text(
                               isSuccess
-                                  ? 'Consent recorded: ${selectedCategory.toUpperCase()} → ${selectedStatus.toUpperCase()} for ${customer.name}'
+                                  ? 'Consent recorded: MARKETING → ${selectedStatus.toUpperCase()} for ${customer.name}'
                                   : 'Failed to record consent: ${result['error']?['message'] ?? 'Unknown error'}',
                             ),
                           ),
@@ -420,7 +386,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                             ),
                           ),
                           const SizedBox(height: 12),
-                          Wrap(
+                        Wrap(
                             spacing: 8,
                             runSpacing: 6,
                             alignment: WrapAlignment.center,
@@ -431,8 +397,6 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                                 StatusBadge.marketingConsent()
                               else
                                 StatusBadge.noConsent(),
-                              if (customer.hasUtilityConsent)
-                                StatusBadge.utilityConsent(),
                             ],
                           ),
                           const SizedBox(height: 18),
@@ -591,103 +555,6 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                                     customer,
                                     initialCategory: 'marketing',
                                     initialStatus: 'opted_out',
-                                  ),
-                                ),
-                            ],
-                          ),
-
-                          const Divider(height: 28),
-
-                          // 2. Utility Consent Section
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        const Text(
-                                          'Utility & Appointment Reminders',
-                                          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
-                                        ),
-                                        const SizedBox(width: 8),
-                                        if (customer.hasUtilityConsent)
-                                          StatusBadge.utilityConsent()
-                                        else
-                                          StatusBadge.noConsent(),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      customer.hasUtilityConsent
-                                          ? 'Eligible for booking confirmations, schedule reminders, and receipts.'
-                                          : 'No active utility consent recorded.',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
-                                      ),
-                                    ),
-                                    if (customer.hasUtilityConsent && customer.utilityConsentRecordedAt != null) ...[
-                                      const SizedBox(height: 6),
-                                      Text(
-                                        'Recorded: ${dateFormat.format(customer.utilityConsentRecordedAt!)}',
-                                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
-                                      ),
-                                      if (customer.utilityConsentSource != null)
-                                        Text(
-                                          'Source: ${customer.utilityConsentSource}',
-                                          style: TextStyle(fontSize: 11, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
-                                        ),
-                                      if (customer.utilityConsentEvidence != null)
-                                        Text(
-                                          'Evidence: ${customer.utilityConsentEvidence}',
-                                          style: TextStyle(fontSize: 11, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
-                                        ),
-                                      if (customer.utilityConsentTextVersion != null)
-                                        Text(
-                                          'Policy: ${customer.utilityConsentTextVersion}',
-                                          style: TextStyle(fontSize: 11, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
-                                        ),
-                                    ],
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          Wrap(
-                            spacing: 8,
-                            children: [
-                              OutlinedButton.icon(
-                                icon: const Icon(Icons.notifications_active_outlined, size: 16),
-                                label: Text(customer.hasUtilityConsent ? 'Update Utility Opt-In' : 'Record Utility Opt-In'),
-                                style: OutlinedButton.styleFrom(
-                                  foregroundColor: const Color(0xFF0277BD),
-                                  side: const BorderSide(color: Color(0xFF0277BD)),
-                                  visualDensity: VisualDensity.compact,
-                                ),
-                                onPressed: () => _showRecordConsentDialog(
-                                  customer,
-                                  initialCategory: 'utility',
-                                  initialStatus: 'opted_in',
-                                ),
-                              ),
-                              if (customer.hasUtilityConsent)
-                                OutlinedButton.icon(
-                                  icon: const Icon(Icons.remove_circle_outline_rounded, size: 16),
-                                  label: const Text('Revoke Utility'),
-                                  style: OutlinedButton.styleFrom(
-                                    foregroundColor: Colors.orange.shade800,
-                                    side: BorderSide(color: Colors.orange.shade800),
-                                    visualDensity: VisualDensity.compact,
-                                  ),
-                                  onPressed: () => _showRecordConsentDialog(
-                                    customer,
-                                    initialCategory: 'utility',
-                                    initialStatus: 'revoked',
                                   ),
                                 ),
                             ],

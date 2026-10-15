@@ -1,6 +1,11 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:glowblast/services/excel_service.dart';
+import 'package:glowblast/services/glowblast_backend_client.dart';
+import 'package:glowblast/data/models/auth_user.dart';
 import 'package:glowblast/data/models/settings_model.dart';
 import 'package:glowblast/data/models/customer.dart';
 import 'package:glowblast/data/models/campaign.dart';
@@ -608,20 +613,106 @@ void main() {
       expect(reconstructed.utilityConsentEvidence, 'Booking #BK-9912');
     });
 
-    test('AppRepository recordCustomerConsent updates local state and filters lists correctly', () async {
+    test('Consent recording requires authentication and rejects unauthenticated request without updating local state', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': '[{"id":"cust_test_1","name":"Client 1","phone":"+91 98765 43210","hasMarketingConsent":false}]',
+      });
+      final repository = AppRepository();
+      await repository.init();
+
+      final result = await repository.recordCustomerConsent(
+        customerId: 'cust_test_1',
+        category: 'marketing',
+        status: 'opted_in',
+        source: 'Front Desk Tablet',
+        evidence: 'Form #101',
+      );
+
+      expect(result['success'], isFalse);
+      expect(result['error']?['code'], 'UNAUTHORIZED');
+      expect(repository.marketingConsentedCustomers, isEmpty);
+      expect(repository.customers.first.hasMarketingConsent, isFalse);
+    });
+
+    test('Failed backend consent recording does not create false green Opt-In badge', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': '[{"id":"cust_test_1","name":"Client 1","phone":"+91 98765 43210","hasMarketingConsent":false}]',
+      });
+      final repository = AppRepository();
+      await repository.init();
+
+      await repository.saveAuthSession(
+        'valid_jwt_token',
+        AuthUser(id: 'usr_1', name: 'Owner', email: 'owner@spa.com', businessName: 'Spa', emailVerified: true),
+      );
+
+      // Mock backend client to return 500 failure
+      repository.backendClient = GlowBlastBackendClient(
+        baseUrl: 'https://mock.glowblast.api',
+        authToken: 'valid_jwt_token',
+        httpClient: MockClient((req) async {
+          return http.Response(jsonEncode({'success': false, 'error': {'message': 'Database error'}}), 500);
+        }),
+      );
+
+      final result = await repository.recordCustomerConsent(
+        customerId: 'cust_test_1',
+        category: 'marketing',
+        status: 'opted_in',
+        source: 'Front Desk',
+        evidence: 'Evidence #1',
+      );
+
+      expect(result['success'], isFalse);
+      expect(repository.marketingConsentedCustomers, isEmpty);
+      expect(repository.customers.first.hasMarketingConsent, isFalse);
+    });
+
+    test('Authorized consent recording succeeds and updates local state & filters', () async {
       SharedPreferences.setMockInitialValues({
         'glowblast_is_initialized_v3': true,
         'glowblast_customers_v3': '[{"id":"cust_test_1","name":"Client 1","phone":"+91 98765 43210","hasMarketingConsent":false,"hasUtilityConsent":false},{"id":"cust_test_2","name":"Client 2","phone":"+91 98765 43211","hasMarketingConsent":false,"hasUtilityConsent":false}]',
       });
-
       final repository = AppRepository();
       await repository.init();
+
+      await repository.saveAuthSession(
+        'valid_jwt_token',
+        AuthUser(id: 'usr_1', name: 'Owner', email: 'owner@spa.com', businessName: 'Spa', emailVerified: true),
+      );
+
+      repository.backendClient = GlowBlastBackendClient(
+        baseUrl: 'https://mock.glowblast.api',
+        authToken: 'valid_jwt_token',
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/api/consent/record') {
+            final body = jsonDecode(req.body);
+            return http.Response(
+              jsonEncode({
+                'success': true,
+                'record': {
+                  'phone': body['phone'],
+                  'consentCategory': body['consentCategory'],
+                  'status': body['status'],
+                  'recordedAt': DateTime.now().toIso8601String(),
+                  'source': body['source'],
+                  'evidence': body['evidence'],
+                },
+              }),
+              200,
+            );
+          }
+          return http.Response('{"success": true}', 200);
+        }),
+      );
 
       expect(repository.marketingConsentedCustomers, isEmpty);
       expect(repository.utilityConsentedCustomers, isEmpty);
 
       // Record Marketing Consent for Client 1
-      await repository.recordCustomerConsent(
+      final res1 = await repository.recordCustomerConsent(
         customerId: 'cust_test_1',
         category: 'marketing',
         status: 'opted_in',
@@ -630,6 +721,7 @@ void main() {
         consentTextVersion: 'v2026.1_promo',
       );
 
+      expect(res1['success'], isTrue);
       expect(repository.marketingConsentedCustomers.length, 1);
       expect(repository.marketingConsentedCustomers.first.id, 'cust_test_1');
       expect(repository.marketingConsentedCustomers.first.hasMarketingConsent, isTrue);
@@ -637,7 +729,7 @@ void main() {
       expect(repository.utilityConsentedCustomers, isEmpty);
 
       // Record Utility Consent for Client 2
-      await repository.recordCustomerConsent(
+      final res2 = await repository.recordCustomerConsent(
         customerId: 'cust_test_2',
         category: 'utility',
         status: 'opted_in',
@@ -646,12 +738,13 @@ void main() {
         consentTextVersion: 'v2026.1_utility',
       );
 
+      expect(res2['success'], isTrue);
       expect(repository.marketingConsentedCustomers.length, 1);
       expect(repository.utilityConsentedCustomers.length, 1);
       expect(repository.utilityConsentedCustomers.first.id, 'cust_test_2');
 
       // Opt out Client 1 -> must be immediately excluded from marketing consented list
-      await repository.recordCustomerConsent(
+      final res3 = await repository.recordCustomerConsent(
         customerId: 'cust_test_1',
         category: 'marketing',
         status: 'opted_out',
@@ -659,8 +752,137 @@ void main() {
         evidence: 'Customer verbal opt-out',
       );
 
+      expect(res3['success'], isTrue);
       expect(repository.marketingConsentedCustomers, isEmpty);
       expect(repository.utilityConsentedCustomers.length, 1);
+    });
+
+    test('bulkRecordMarketingConsent updates only selected customers and reports partial failures', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': '[{"id":"cust_1","name":"Client 1","phone":"+91 98765 43210","hasMarketingConsent":false},{"id":"cust_2","name":"Client 2","phone":"+91 98765 43211","hasMarketingConsent":false},{"id":"cust_3","name":"Client 3","phone":"+91 98765 43212","hasMarketingConsent":false}]',
+      });
+      final repository = AppRepository();
+      await repository.init();
+
+      await repository.saveAuthSession(
+        'valid_jwt_token',
+        AuthUser(id: 'usr_1', name: 'Owner', email: 'owner@spa.com', businessName: 'Spa', emailVerified: true),
+      );
+
+      // Mock backend: succeeds for cust_1, fails for cust_2
+      repository.backendClient = GlowBlastBackendClient(
+        baseUrl: 'https://mock.glowblast.api',
+        authToken: 'valid_jwt_token',
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/api/consent/record') {
+            final body = jsonDecode(req.body);
+            if (body['customerId'] == 'cust_2') {
+              return http.Response(jsonEncode({'success': false, 'error': {'message': 'Consent update rejected'}}), 400);
+            }
+            return http.Response(
+              jsonEncode({
+                'success': true,
+                'record': {
+                  'phone': body['phone'],
+                  'consentCategory': 'marketing',
+                  'status': 'opted_in',
+                  'recordedAt': DateTime.now().toIso8601String(),
+                  'source': body['source'],
+                  'evidence': body['evidence'],
+                },
+              }),
+              200,
+            );
+          }
+          return http.Response('{"success": true}', 200);
+        }),
+      );
+
+      // Bulk record for cust_1 and cust_2 (cust_3 is NOT selected)
+      final bulkResult = await repository.bulkRecordMarketingConsent(
+        customerIds: ['cust_1', 'cust_2'],
+        source: 'Verbal Front Desk',
+        evidence: 'In-person check-in',
+      );
+
+      expect(bulkResult['success'], isFalse); // Partial failure accurately reported
+      expect(bulkResult['totalRequested'], 2);
+      expect(bulkResult['succeeded'], 1);
+      expect(bulkResult['failed'], 1);
+      expect(bulkResult['failures'].length, 1);
+      expect(bulkResult['failures'][0]['customerId'], 'cust_2');
+
+      // cust_1 was updated with verified opt-in
+      expect(repository.customers.firstWhere((c) => c.id == 'cust_1').hasMarketingConsent, isTrue);
+      // cust_2 was NOT updated because backend rejected it
+      expect(repository.customers.firstWhere((c) => c.id == 'cust_2').hasMarketingConsent, isFalse);
+      // cust_3 was untouched because it was never selected
+      expect(repository.customers.firstWhere((c) => c.id == 'cust_3').hasMarketingConsent, isFalse);
+    });
+
+    test('bulk consent cannot override a recorded opt-out and preserves unselected customers', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': '[{"id":"cust_opted_out","name":"Opted Out Client","phone":"+91 98765 43210","hasMarketingConsent":false,"isOptedOut":true},{"id":"cust_unselected","name":"Unselected Client","phone":"+91 98765 43211","hasMarketingConsent":false,"isOptedOut":false}]',
+      });
+      final repository = AppRepository();
+      await repository.init();
+
+      await repository.saveAuthSession(
+        'valid_jwt_token',
+        AuthUser(id: 'usr_1', name: 'Owner', email: 'owner@spa.com', businessName: 'Spa', emailVerified: true),
+      );
+
+      bool allowOptOutOverrideReceived = true;
+      repository.backendClient = GlowBlastBackendClient(
+        baseUrl: 'https://mock.glowblast.api',
+        authToken: 'valid_jwt_token',
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/api/consent/record') {
+            final body = jsonDecode(req.body);
+            allowOptOutOverrideReceived = body['allowOptOutOverride'] == true;
+            if (body['allowOptOutOverride'] != true) {
+              return http.Response(
+                jsonEncode({
+                  'success': false,
+                  'error': {
+                    'code': 'CONSENT_RECORD_FAILED',
+                    'message': 'Consent update rejected. Reversing an opt-out requires allowOptOutOverride: true and verified administrator authorization.',
+                  },
+                }),
+                400,
+              );
+            }
+            return http.Response(jsonEncode({'success': true}), 200);
+          }
+          return http.Response('{"success": true}', 200);
+        }),
+      );
+
+      final bulkResult = await repository.bulkRecordMarketingConsent(
+        customerIds: ['cust_opted_out'],
+        source: 'Front Desk Attempt',
+        evidence: 'Verbal claim',
+      );
+
+      expect(allowOptOutOverrideReceived, isFalse);
+      expect(bulkResult['success'], isFalse);
+      expect(bulkResult['failed'], 1);
+      expect(repository.customers.firstWhere((c) => c.id == 'cust_opted_out').hasMarketingConsent, isFalse);
+      expect(repository.customers.firstWhere((c) => c.id == 'cust_unselected').hasMarketingConsent, isFalse);
+    });
+
+    test('Excel import preserves customer list without automatically granting marketing consent', () async {
+      final bytes = ExcelService.generate200RowTestSampleBytes();
+      final result = ExcelService.parseAndValidate(Uint8List.fromList(bytes));
+
+      expect(result.validCustomers.isNotEmpty, isTrue);
+      for (final cust in result.validCustomers) {
+        expect(cust.hasMarketingConsent, isFalse);
+        expect(cust.hasWhatsAppConsent, isFalse);
+        expect(cust.hasUtilityConsent, isFalse);
+      }
     });
   });
 }

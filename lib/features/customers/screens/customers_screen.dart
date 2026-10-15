@@ -28,6 +28,8 @@ class _CustomersScreenState extends State<CustomersScreen> {
   final TextEditingController _searchController = TextEditingController();
   String _selectedFilter = 'All'; // 'All', 'Recently Added', 'Opted-Out'
   String _searchQuery = '';
+  bool _isSelectionMode = false;
+  final Set<String> _selectedCustomerIds = {};
 
   @override
   void dispose() {
@@ -63,11 +65,8 @@ class _CustomersScreenState extends State<CustomersScreen> {
       case 'Marketing Opt-In':
         list = customers.where((c) => !c.isOptedOut && c.hasMarketingConsent).toList();
         break;
-      case 'Utility Only':
-        list = customers.where((c) => !c.isOptedOut && c.hasUtilityConsent).toList();
-        break;
       case 'Unconsented':
-        list = customers.where((c) => !c.isOptedOut && !c.hasMarketingConsent && !c.hasUtilityConsent).toList();
+        list = customers.where((c) => !c.isOptedOut && !c.hasMarketingConsent).toList();
         break;
       case 'Recently Added':
         list = widget.repository.recentlyAddedCustomers;
@@ -113,6 +112,154 @@ class _CustomersScreenState extends State<CustomersScreen> {
     );
   }
 
+  void _showBulkConsentDialog(AppRepository repo) async {
+    if (_selectedCustomerIds.isEmpty) return;
+
+    if (!repo.isAuthenticated) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('You must be logged in to record consent. Please sign in and try again.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    final sourceController = TextEditingController(text: 'Front Desk Verbal Agreement');
+    final evidenceController = TextEditingController(text: 'Customer In-Person Verbal Opt-In');
+    bool isSubmitting = false;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.verified_user_rounded, color: AppColors.whatsApp),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text('Record Verbal Marketing Consent', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE8F5E9),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppColors.whatsApp.withValues(alpha: 0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Selected Customers: ${_selectedCustomerIds.length}',
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppColors.whatsApp),
+                          ),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Only record consent for customers who have explicitly and verbally agreed to receive WhatsApp promotional broadcasts.',
+                            style: TextStyle(fontSize: 11.5, color: Colors.black87),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Recorded by: ${repo.currentUser?.email ?? repo.currentUser?.name ?? "Authenticated Admin"}\nDate: ${DateTime.now().toLocal().toString().split(".")[0]}',
+                            style: const TextStyle(fontSize: 11, color: Colors.black54),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    const Text('Consent Source', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    TextField(
+                      controller: sourceController,
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        hintText: 'e.g. Verbal in-person agreement',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text('Evidence Reference', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    TextField(
+                      controller: evidenceController,
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        hintText: 'e.g. Customer In-Person Verbal Opt-In',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isSubmitting ? null : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.whatsApp,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: isSubmitting
+                      ? null
+                      : () async {
+                          setDialogState(() => isSubmitting = true);
+                          final messenger = ScaffoldMessenger.of(context);
+                          final dialogNav = Navigator.of(dialogContext);
+
+                          final result = await repo.bulkRecordMarketingConsent(
+                            customerIds: _selectedCustomerIds.toList(),
+                            source: sourceController.text.trim(),
+                            evidence: evidenceController.text.trim(),
+                          );
+
+                          dialogNav.pop();
+                          if (!mounted) return;
+
+                          final succeeded = result['succeeded'] ?? 0;
+                          final failed = result['failed'] ?? 0;
+                          final isSuccess = result['success'] == true;
+
+                          setState(() {
+                            _selectedCustomerIds.clear();
+                            _isSelectionMode = false;
+                          });
+
+                          messenger.showSnackBar(
+                            SnackBar(
+                              backgroundColor: isSuccess ? AppColors.whatsApp : (succeeded > 0 ? AppColors.warning : AppColors.error),
+                              content: Text(
+                                isSuccess
+                                    ? 'Marketing consent recorded for $succeeded customers.'
+                                    : 'Recorded $succeeded / ${result['totalRequested']} ($failed failed: ${result['failures']?[0]?['error'] ?? 'Unknown error'})',
+                              ),
+                            ),
+                          );
+                        },
+                  child: isSubmitting
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : Text('Record Consent (${_selectedCustomerIds.length})'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -125,51 +272,105 @@ class _CustomersScreenState extends State<CustomersScreen> {
 
         return Scaffold(
           appBar: AppBar(
-            title: Text('Customers (${allCustomers.length})'),
-            actions: [
-              IconButton(
-                tooltip: 'Customer Groups',
-                icon: const Icon(Icons.folder_shared_outlined),
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => GroupsScreen(repository: widget.repository),
+            leading: _isSelectionMode
+                ? IconButton(
+                    icon: const Icon(Icons.close_rounded),
+                    tooltip: 'Cancel Selection',
+                    onPressed: () {
+                      setState(() {
+                        _isSelectionMode = false;
+                        _selectedCustomerIds.clear();
+                      });
+                    },
+                  )
+                : null,
+            title: Text(_isSelectionMode
+                ? '${_selectedCustomerIds.length} Selected'
+                : 'Customers (${allCustomers.length})'),
+            actions: _isSelectionMode
+                ? [
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          if (_selectedCustomerIds.length == filteredList.length) {
+                            _selectedCustomerIds.clear();
+                          } else {
+                            _selectedCustomerIds.addAll(filteredList.map((c) => c.id));
+                          }
+                        });
+                      },
+                      child: Text(
+                        _selectedCustomerIds.length == filteredList.length ? 'Deselect All' : 'Select All',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
                     ),
-                  );
-                },
-              ),
-              IconButton(
-                tooltip: 'Export Excel',
-                icon: const Icon(Icons.file_upload_outlined),
-                onPressed: _exportExcel,
-              ),
-              IconButton(
-                tooltip: 'Import Excel',
-                icon: const Icon(Icons.file_download_outlined),
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => ExcelImportScreen(repository: widget.repository),
+                  ]
+                : [
+                    IconButton(
+                      tooltip: 'Select Customers for Verbal Consent',
+                      icon: const Icon(Icons.playlist_add_check_rounded),
+                      onPressed: () {
+                        setState(() {
+                          _isSelectionMode = true;
+                          _selectedCustomerIds.clear();
+                        });
+                      },
                     ),
-                  );
-                },
-              ),
-            ],
+                    IconButton(
+                      tooltip: 'Customer Groups',
+                      icon: const Icon(Icons.folder_shared_outlined),
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (context) => GroupsScreen(repository: widget.repository),
+                          ),
+                        );
+                      },
+                    ),
+                    IconButton(
+                      tooltip: 'Export Excel',
+                      icon: const Icon(Icons.file_upload_outlined),
+                      onPressed: _exportExcel,
+                    ),
+                    IconButton(
+                      tooltip: 'Import Excel',
+                      icon: const Icon(Icons.file_download_outlined),
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (context) => ExcelImportScreen(repository: widget.repository),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
           ),
-          floatingActionButton: FloatingActionButton.extended(
-            heroTag: 'fab_customers',
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (context) => AddEditCustomerScreen(repository: widget.repository),
+          floatingActionButton: _isSelectionMode
+              ? (_selectedCustomerIds.isNotEmpty
+                  ? FloatingActionButton.extended(
+                      heroTag: 'fab_bulk_consent',
+                      onPressed: () => _showBulkConsentDialog(repo),
+                      backgroundColor: AppColors.whatsApp,
+                      foregroundColor: Colors.white,
+                      icon: const Icon(Icons.verified_user_rounded),
+                      label: Text('Record Marketing Consent (${_selectedCustomerIds.length})',
+                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                    )
+                  : null)
+              : FloatingActionButton.extended(
+                  heroTag: 'fab_customers',
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) => AddEditCustomerScreen(repository: widget.repository),
+                      ),
+                    );
+                  },
+                  backgroundColor: AppColors.primarySage,
+                  foregroundColor: Colors.white,
+                  icon: const Icon(Icons.person_add_rounded),
+                  label: const Text('Add Customer', style: TextStyle(fontWeight: FontWeight.w700)),
                 ),
-              );
-            },
-            backgroundColor: AppColors.primarySage,
-            foregroundColor: Colors.white,
-            icon: const Icon(Icons.person_add_rounded),
-            label: const Text('Add Customer', style: TextStyle(fontWeight: FontWeight.w700)),
-          ),
           body: SafeArea(
             child: Column(
               children: [
@@ -219,9 +420,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
                       const SizedBox(width: 8),
                       _buildFilterChip('Marketing Opt-In', 'Marketing Opt-In (${repo.marketingConsentedCustomers.length})', isDark),
                       const SizedBox(width: 8),
-                      _buildFilterChip('Utility Only', 'Utility Only (${repo.utilityConsentedCustomers.length})', isDark),
-                      const SizedBox(width: 8),
-                      _buildFilterChip('Unconsented', 'Unconsented (${allCustomers.where((c) => !c.isOptedOut && !c.hasMarketingConsent && !c.hasUtilityConsent).length})', isDark),
+                      _buildFilterChip('Unconsented', 'Unconsented (${allCustomers.where((c) => !c.isOptedOut && !c.hasMarketingConsent).length})', isDark),
                       const SizedBox(width: 8),
                       _buildFilterChip('Opted-Out', 'Opted-Out (${repo.optedOutCustomersCount})', isDark),
                     ],
@@ -258,7 +457,26 @@ class _CustomersScreenState extends State<CustomersScreen> {
                             return AppCard(
                               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                               child: InkWell(
+                                onLongPress: () {
+                                  setState(() {
+                                    _isSelectionMode = true;
+                                    _selectedCustomerIds.add(customer.id);
+                                  });
+                                },
                                 onTap: () {
+                                  if (_isSelectionMode) {
+                                    setState(() {
+                                      if (_selectedCustomerIds.contains(customer.id)) {
+                                        _selectedCustomerIds.remove(customer.id);
+                                        if (_selectedCustomerIds.isEmpty) {
+                                          _isSelectionMode = false;
+                                        }
+                                      } else {
+                                        _selectedCustomerIds.add(customer.id);
+                                      }
+                                    });
+                                    return;
+                                  }
                                   Navigator.of(context).push(
                                     MaterialPageRoute(
                                       builder: (context) => CustomerDetailScreen(
@@ -270,6 +488,25 @@ class _CustomersScreenState extends State<CustomersScreen> {
                                 },
                                 child: Row(
                                   children: [
+                                    if (_isSelectionMode) ...[
+                                      Checkbox(
+                                        value: _selectedCustomerIds.contains(customer.id),
+                                        activeColor: AppColors.primarySage,
+                                        onChanged: (val) {
+                                          setState(() {
+                                            if (val == true) {
+                                              _selectedCustomerIds.add(customer.id);
+                                            } else {
+                                              _selectedCustomerIds.remove(customer.id);
+                                              if (_selectedCustomerIds.isEmpty) {
+                                                _isSelectionMode = false;
+                                              }
+                                            }
+                                          });
+                                        },
+                                      ),
+                                      const SizedBox(width: 4),
+                                    ],
                                     // Initials Avatar
                                     CircleAvatar(
                                       radius: 20,
@@ -314,9 +551,6 @@ class _CustomersScreenState extends State<CustomersScreen> {
                                               ] else if (customer.hasMarketingConsent) ...[
                                                 const SizedBox(width: 6),
                                                 StatusBadge.marketingConsent(),
-                                              ] else if (customer.hasUtilityConsent) ...[
-                                                const SizedBox(width: 6),
-                                                StatusBadge.utilityConsent(),
                                               ] else ...[
                                                 const SizedBox(width: 6),
                                                 StatusBadge.noConsent(),
@@ -336,15 +570,16 @@ class _CustomersScreenState extends State<CustomersScreen> {
                                     ),
 
                                     // WhatsApp Action Icon
-                                    IconButton(
-                                      tooltip: 'WhatsApp Message',
-                                      icon: Icon(
-                                        Icons.chat_rounded,
-                                        color: customer.isOptedOut ? Colors.grey : AppColors.whatsApp,
-                                        size: 22,
+                                    if (!_isSelectionMode)
+                                      IconButton(
+                                        tooltip: 'WhatsApp Message',
+                                        icon: Icon(
+                                          Icons.chat_rounded,
+                                          color: customer.isOptedOut ? Colors.grey : AppColors.whatsApp,
+                                          size: 22,
+                                        ),
+                                        onPressed: () => _openComposerForCustomer(customer),
                                       ),
-                                      onPressed: () => _openComposerForCustomer(customer),
-                                    ),
                                   ],
                                 ),
                               ),

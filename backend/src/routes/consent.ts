@@ -147,6 +147,96 @@ router.post('/record', async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/consent/bulk-record
+ * Records verbal marketing opt-in for a batch of customers.
+ * Each record is attempted independently; partial failures are reported.
+ * Never assigns consent during import — this endpoint is for confirmed verbal consent only.
+ */
+const bulkRecordSchema = z.object({
+  records: z.array(
+    z.object({
+      phone: z.string().min(10, 'Valid phone number is required'),
+      customerId: z.string().optional(),
+      source: z.string().min(3, 'Consent source is required'),
+      evidence: z.string().min(3, 'Auditable evidence reference is required'),
+      consentTextVersion: z.string().optional(),
+    })
+  ).min(1).max(500, 'Bulk consent limited to 500 records per request'),
+  allowOptOutOverride: z.boolean().default(false),
+});
+
+router.post('/bulk-record', async (req: Request, res: Response) => {
+  const auth = await authenticateAndAuthorize(req, res);
+  if (!auth) return;
+
+  const isAuthorizedAdmin = !!(auth.userEmail && isEmailAuthorizedForProduction(auth.userEmail));
+  if (!isAuthorizedAdmin) {
+    res.status(403).json({
+      success: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'Only authorized administrators (PRODUCTION_ALLOWED_EMAILS) may record bulk consent.',
+      },
+    });
+    return;
+  }
+
+  const parsed = bulkRecordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: parsed.error.issues[0]?.message || 'Invalid bulk consent payload',
+      },
+    });
+    return;
+  }
+
+  const { records, allowOptOutOverride } = parsed.data;
+  const updatedBy = auth.userEmail || auth.userId;
+
+  let succeeded = 0;
+  let failed = 0;
+  const failures: Array<{ phone: string; customerId?: string; error: string }> = [];
+
+  for (const entry of records) {
+    const result = await consentStore.recordConsent({
+      phone: entry.phone,
+      customerId: entry.customerId,
+      consentCategory: 'marketing',
+      status: 'opted_in',
+      source: entry.source,
+      evidence: entry.evidence,
+      consentTextVersion: entry.consentTextVersion || 'v2026.1_verbal_confirmed',
+      updatedBy,
+      isAuthorizedAdmin,
+      allowOptOutOverride,
+    });
+
+    if (result) {
+      succeeded++;
+    } else {
+      failed++;
+      failures.push({
+        phone: entry.phone,
+        customerId: entry.customerId,
+        error: 'Consent update rejected (possible opt-out override blocked)',
+      });
+    }
+  }
+
+  res.status(200).json({
+    success: failed === 0,
+    totalRequested: records.length,
+    succeeded,
+    failed,
+    failures,
+  });
+});
+
+
+/**
  * GET /api/consent
  * Returns all consent records, optionally filtered by category query param.
  */
@@ -217,21 +307,13 @@ router.get('/:phone', async (req: Request, res: Response) => {
 
   if (categoryQuery === 'marketing' || categoryQuery === 'utility') {
     const record = await consentStore.getConsent(phone, categoryQuery as ConsentCategory);
-    if (!record) {
-      res.status(404).json({
-        success: false,
-        hasConsent: false,
-        status: 'unknown',
-        category: categoryQuery,
-        message: `No ${categoryQuery} consent record exists for this recipient in server registry.`,
-      });
-      return;
-    }
-
+    // Always return 200 so callers can reliably check hasConsent without catching 404
     res.status(200).json({
       success: true,
-      hasConsent: record.status === 'opted_in',
-      record,
+      hasConsent: record?.status === 'opted_in',
+      status: record?.status || 'unknown',
+      record: record || null,
+      category: categoryQuery,
     });
     return;
   }

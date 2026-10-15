@@ -338,7 +338,7 @@ class AppRepository extends ChangeNotifier {
     _groups = InitialData.getInitialGroups(_customers);
     _templates = InitialData.getInitialTemplates();
     _settings = AppSettings();
-    backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
+    backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl, authToken: _authToken);
   }
 
   Future<void> _saveAll([SharedPreferences? prefs]) async {
@@ -389,7 +389,9 @@ class AppRepository extends ChangeNotifier {
     }
   }
 
-  /// Records genuine, auditable WhatsApp customer opt-in or opt-out consent with category
+  /// Records genuine, auditable WhatsApp customer opt-in or opt-out consent with category.
+  /// Local state is updated ONLY after the backend confirms success.
+  /// If the backend call fails (auth error, network, etc.), local state is NOT changed.
   Future<Map<String, dynamic>> recordCustomerConsent({
     required String customerId,
     required String category, // 'marketing' | 'utility'
@@ -404,13 +406,24 @@ class AppRepository extends ChangeNotifier {
       return {'success': false, 'error': {'message': 'Customer not found'}};
     }
 
+    // Require authentication before attempting any consent change.
+    if (_authToken == null || _authToken!.trim().isEmpty) {
+      return {
+        'success': false,
+        'error': {
+          'code': 'UNAUTHORIZED',
+          'message': 'You must be logged in to record consent. Please sign in and try again.',
+        },
+      };
+    }
+
     final customer = _customers[index];
     final cleanPhone = ExcelService.extractClean10Digits(customer.phone);
     final now = DateTime.now();
     final isOptedIn = status == 'opted_in';
 
-    // 1. Post to backend if online & authenticated
-    Map<String, dynamic> backendResult = {'success': true};
+    // 1. Post to backend — do NOT update local state until the backend confirms success.
+    Map<String, dynamic> backendResult;
     try {
       backendResult = await backendClient.recordConsent(
         phone: cleanPhone.length == 10 ? '91$cleanPhone' : cleanPhone,
@@ -423,10 +436,25 @@ class AppRepository extends ChangeNotifier {
         allowOptOutOverride: allowOptOutOverride,
       );
     } catch (e) {
-      debugPrint('[AppRepository] Failed to sync consent to backend: $e');
+      debugPrint('[AppRepository] recordCustomerConsent network error: $e');
+      return {
+        'success': false,
+        'error': {
+          'code': 'NETWORK_ERROR',
+          'message': 'Could not reach the server. Please check your connection and try again.',
+        },
+      };
     }
 
-    // 2. Update local state
+    // 2. Only update local state if backend confirmed success.
+    final isSuccess = backendResult['success'] == true;
+    if (!isSuccess) {
+      // Reload authoritative state from backend to discard any stale cached value.
+      await _reloadConsentForCustomer(customer, index);
+      return backendResult;
+    }
+
+    // 3. Update local state from confirmed backend result.
     Customer updatedCustomer;
     if (category == 'utility') {
       updatedCustomer = customer.copyWith(
@@ -450,11 +478,97 @@ class AppRepository extends ChangeNotifier {
     _customers[index] = updatedCustomer;
     notifyListeners();
 
-    // 3. Persist to SharedPreferences
+    // 4. Persist confirmed state to SharedPreferences.
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyCustomers, jsonEncode(_customers.map((c) => c.toJson()).toList()));
 
     return backendResult;
+  }
+
+  /// Reloads authoritative marketing consent state from backend for a single customer.
+  /// Called after a failed consent write to discard any stale cached state.
+  Future<void> _reloadConsentForCustomer(Customer customer, int index) async {
+    try {
+      final cleanPhone = ExcelService.extractClean10Digits(customer.phone);
+      final phone = cleanPhone.length == 10 ? '91$cleanPhone' : cleanPhone;
+      final result = await backendClient.getConsent(phone: phone, category: 'marketing');
+      if (result['success'] == true) {
+        final hasConsent = result['hasConsent'] == true;
+        final record = result['record'] as Map<String, dynamic>?;
+        _customers[index] = customer.copyWith(
+          hasMarketingConsent: hasConsent,
+          marketingConsentRecordedAt: record != null
+              ? DateTime.tryParse(record['recordedAt']?.toString() ?? '')
+              : null,
+          marketingConsentSource: record?['source']?.toString(),
+          marketingConsentEvidence: record?['evidence']?.toString(),
+          marketingConsentTextVersion: record?['consentTextVersion']?.toString(),
+          isOptedOut: record != null && record['status'] == 'opted_out'
+              ? true
+              : customer.isOptedOut,
+        );
+        notifyListeners();
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_keyCustomers, jsonEncode(_customers.map((c) => c.toJson()).toList()));
+      }
+    } catch (e) {
+      debugPrint('[AppRepository] _reloadConsentForCustomer error: $e');
+    }
+  }
+
+  /// Bulk records verbal marketing consent for a selected list of customer IDs.
+  /// Only updates customers that are explicitly selected.
+  /// Reports per-record outcomes accurately — does NOT claim all succeeded when some fail.
+  Future<Map<String, dynamic>> bulkRecordMarketingConsent({
+    required List<String> customerIds,
+    required String source,
+    required String evidence,
+    String consentTextVersion = 'v2026.1_verbal_confirmed',
+  }) async {
+    if (_authToken == null || _authToken!.trim().isEmpty) {
+      return {
+        'success': false,
+        'error': {
+          'code': 'UNAUTHORIZED',
+          'message': 'You must be logged in to record consent. Please sign in and try again.',
+        },
+      };
+    }
+
+    int succeeded = 0;
+    int failed = 0;
+    final List<Map<String, dynamic>> failures = [];
+
+    for (final id in customerIds) {
+      final result = await recordCustomerConsent(
+        customerId: id,
+        category: 'marketing',
+        status: 'opted_in',
+        source: source,
+        evidence: evidence,
+        consentTextVersion: consentTextVersion,
+        allowOptOutOverride: false,
+      );
+      if (result['success'] == true) {
+        succeeded++;
+      } else {
+        failed++;
+        final cust = _customers.firstWhere((c) => c.id == id, orElse: () => Customer(id: id, name: id, phone: ''));
+        failures.add({
+          'customerId': id,
+          'name': cust.name,
+          'error': result['error']?['message'] ?? 'Unknown error',
+        });
+      }
+    }
+
+    return {
+      'success': failed == 0,
+      'totalRequested': customerIds.length,
+      'succeeded': succeeded,
+      'failed': failed,
+      'failures': failures,
+    };
   }
 
   /// Syncs authoritative consent records from backend
@@ -585,7 +699,11 @@ class AppRepository extends ChangeNotifier {
   // --- Settings & Credits ---
   Future<void> updateSettings(AppSettings newSettings) async {
     _settings = newSettings;
-    backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
+    // Always carry the active auth token into the new client instance.
+    backendClient = GlowBlastBackendClient(
+      baseUrl: _settings.backendUrl,
+      authToken: _authToken,
+    );
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keySettings, jsonEncode(_settings.toJson()));

@@ -913,4 +913,52 @@ class GlowBlastBackendClient {
       return [];
     }
   }
+
+  /// Bulk records verbal marketing opt-in consent for multiple customers.
+  /// Calls POST /api/consent/bulk-record. Each entry is processed independently
+  /// and partial failures are reported accurately.
+  Future<Map<String, dynamic>> bulkRecordConsent({
+    required List<Map<String, dynamic>> records,
+    bool allowOptOutOverride = false,
+    String? token,
+  }) async {
+    final effectiveToken = token ?? authToken;
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
+        'Authorization': 'Bearer ${effectiveToken.trim()}',
+    };
+
+    try {
+      final response = await _httpClient
+          .post(
+            _uri('/api/consent/bulk-record'),
+            headers: headers,
+            body: jsonEncode({
+              'records': records,
+              'allowOptOutOverride': allowOptOutOverride,
+            }),
+          )
+          .timeout(const Duration(seconds: 60));
+
+      Map<String, dynamic> data = {};
+      try {
+        data = jsonDecode(response.body) as Map<String, dynamic>;
+      } catch (_) {}
+
+      return {
+        'success': response.statusCode >= 200 && response.statusCode < 300 && data['success'] == true,
+        'statusCode': response.statusCode,
+        ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {
+          'code': 'NETWORK_ERROR',
+          'message': 'Failed to bulk record consent: $e',
+        },
+      };
+    }
+  }
 }

@@ -53,14 +53,54 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
         ? widget.repository.settings.businessName
         : 'our spa';
 
-    // Initialize template selection from repository
-    if (widget.preselectedTemplateId != null) {
-      _selectedTemplate = widget.repository.getTemplateById(widget.preselectedTemplateId!) ??
-          widget.repository.getTemplateByName(widget.preselectedTemplateId!);
+    // Initialize template selection from repository strictly respecting active mode
+    if (widget.repository.settings.isWhatsAppProductionMode) {
+      if (widget.preselectedTemplateId != null) {
+        final tpl = widget.repository.getTemplateById(widget.preselectedTemplateId!) ??
+            widget.repository.getTemplateByName(widget.preselectedTemplateId!);
+        if (tpl != null && tpl.isProduction) {
+          _selectedTemplate = tpl;
+        }
+      }
+      _selectedTemplate ??= widget.repository.activeApprovedTemplates.firstOrNull ??
+          widget.repository.activeTemplates.firstOrNull;
+      if (_selectedTemplate != null && !_selectedTemplate!.isProduction) {
+        _selectedTemplate = null;
+      }
+    } else {
+      if (widget.preselectedTemplateId != null) {
+        _selectedTemplate = widget.repository.getTemplateById(widget.preselectedTemplateId!) ??
+            widget.repository.getTemplateByName(widget.preselectedTemplateId!);
+      }
+      _selectedTemplate ??= widget.repository.activeApprovedTemplates.firstOrNull ??
+          widget.repository.approvedTemplates.firstOrNull ??
+          widget.repository.activeTemplates.firstOrNull ??
+          widget.repository.templates.firstOrNull;
     }
 
-    _selectedTemplate ??= widget.repository.approvedTemplates.firstOrNull ??
-        widget.repository.templates.firstOrNull;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.repository.fetchTemplatesFromBackend().then((_) {
+        if (!mounted) return;
+        final isProd = widget.repository.settings.isWhatsAppProductionMode;
+        if (isProd) {
+          if (_selectedTemplate == null || !_selectedTemplate!.isProduction || !_selectedTemplate!.isApproved) {
+            setState(() {
+              _selectedTemplate = widget.repository.activeApprovedTemplates.firstOrNull;
+              if (_selectedTemplate != null && _messageController.text.isEmpty) {
+                _messageController.text = _selectedTemplate!.localBody;
+              }
+            });
+          }
+        } else if (_selectedTemplate == null || !_selectedTemplate!.isApproved) {
+          setState(() {
+            _selectedTemplate = widget.repository.activeApprovedTemplates.firstOrNull ?? _selectedTemplate;
+            if (_selectedTemplate != null && _messageController.text.isEmpty) {
+              _messageController.text = _selectedTemplate!.localBody;
+            }
+          });
+        }
+      });
+    });
 
     String initialTitle = _selectedTemplate?.displayName ?? 'Monsoon Glow Offer';
     String initialMsg = _selectedTemplate?.body ??
@@ -303,10 +343,10 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
         return;
       }
     } else if (settings.isWhatsAppProductionMode) {
-      if (_selectedTemplate == null || !_selectedTemplate!.canSend) {
+      if (_selectedTemplate == null || !_selectedTemplate!.canSend || !_selectedTemplate!.isProduction) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Please select an approved production WhatsApp template.'),
+            content: Text('Please select an approved production WhatsApp template (e.g. diwali_spa_offer).'),
             backgroundColor: AppColors.error,
           ),
         );
@@ -503,10 +543,18 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
                           return;
                         }
                         if (_currentStep == 1) {
-                          if (_selectedTemplate == null || !_selectedTemplate!.canSend) {
+                          final isProd = widget.repository.settings.isWhatsAppProductionMode;
+                          final isBlocked = _selectedTemplate == null ||
+                              !_selectedTemplate!.canSend ||
+                              (isProd && !_selectedTemplate!.isProduction);
+                          if (isBlocked) {
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('This GlowBlast template is not connected to an approved WhatsApp template yet.'),
+                              SnackBar(
+                                content: Text(
+                                  isProd
+                                      ? 'An approved production WhatsApp template (e.g. diwali_spa_offer) is required to proceed with a production campaign.'
+                                      : 'This GlowBlast template is not connected to an approved WhatsApp template yet.',
+                                ),
                                 backgroundColor: AppColors.error,
                               ),
                             );
@@ -527,17 +575,27 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
                             : 'Confirm Schedule',
                       ),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: (widget.repository.settings.isWhatsAppTestMode && recipients.length > 5) || (_selectedTemplate == null || !_selectedTemplate!.canSend)
+                        backgroundColor: (widget.repository.settings.isWhatsAppTestMode && recipients.length > 5) ||
+                                (_selectedTemplate == null ||
+                                    !_selectedTemplate!.canSend ||
+                                    (widget.repository.settings.isWhatsAppProductionMode && !_selectedTemplate!.isProduction))
                             ? Colors.grey
                             : AppColors.primarySage,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                       ),
-                      onPressed: (_selectedTemplate == null || !_selectedTemplate!.canSend)
+                      onPressed: (_selectedTemplate == null ||
+                              !_selectedTemplate!.canSend ||
+                              (widget.repository.settings.isWhatsAppProductionMode && !_selectedTemplate!.isProduction))
                           ? () {
+                              final isProd = widget.repository.settings.isWhatsAppProductionMode;
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('This GlowBlast template is not connected to an approved WhatsApp template yet.'),
+                                SnackBar(
+                                  content: Text(
+                                    isProd
+                                        ? 'An approved production WhatsApp template is required to send a production campaign.'
+                                        : 'This GlowBlast template is not connected to an approved WhatsApp template yet.',
+                                  ),
                                   backgroundColor: AppColors.error,
                                 ),
                               );
@@ -864,6 +922,11 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
   // --- Step 2: Message ---
   Widget _buildStep2Message(bool isDark, Customer? sampleCustomer) {
     final previewResolved = _resolveMessagePreview(_messageController.text, sampleCustomer);
+    final isProd = widget.repository.settings.isWhatsAppProductionMode;
+
+    if (isProd && _selectedTemplate != null && !_selectedTemplate!.isProduction) {
+      _selectedTemplate = null;
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -905,46 +968,94 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
               value: _selectedTemplate,
               isExpanded: true,
               hint: const Text('Select an Approved Template'),
-              items: widget.repository.templates.map((tpl) {
-                return DropdownMenuItem<WhatsAppTemplate>(
-                  value: tpl,
-                  child: Row(
-                    children: [
-                      Icon(
-                        tpl.isApproved ? Icons.verified_rounded : Icons.pending_actions_rounded,
-                        size: 16,
-                        color: tpl.isApproved ? AppColors.whatsApp : AppColors.accentGold,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          tpl.displayName,
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            color: tpl.isApproved ? null : AppColors.textMuted,
-                          ),
-                          overflow: TextOverflow.ellipsis,
+              items: (() {
+                final List<WhatsAppTemplate> list;
+                if (isProd) {
+                  // In production mode, show ONLY production templates
+                  list = widget.repository.activeTemplates.where((t) => t.isProduction).toList();
+                } else {
+                  final source = widget.repository.templates;
+                  list = [...source];
+                  if (_selectedTemplate != null && !list.any((t) => t.id == _selectedTemplate!.id)) {
+                    list.insert(0, _selectedTemplate!);
+                  }
+                }
+                return list.map((tpl) {
+                  return DropdownMenuItem<WhatsAppTemplate>(
+                    value: tpl,
+                    child: Row(
+                      children: [
+                        Icon(
+                          tpl.isApproved ? Icons.verified_rounded : Icons.pending_actions_rounded,
+                          size: 16,
+                          color: tpl.isApproved ? AppColors.whatsApp : AppColors.accentGold,
                         ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: (tpl.isApproved ? Colors.green : Colors.orange).withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          tpl.approvalStatus.toUpperCase(),
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            color: tpl.isApproved ? Colors.green.shade800 : Colors.orange.shade800,
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            tpl.displayName,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: tpl.isApproved ? null : AppColors.textMuted,
+                            ),
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                );
-              }).toList(),
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: tpl.isProduction
+                                ? AppColors.whatsApp.withValues(alpha: 0.12)
+                                : Colors.purple.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            tpl.isProduction ? 'PROD' : 'TEST',
+                            style: TextStyle(
+                              fontSize: 9,
+                              fontWeight: FontWeight.w700,
+                              color: tpl.isProduction ? AppColors.whatsApp : Colors.purple.shade700,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade200,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            tpl.language,
+                            style: TextStyle(
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.grey.shade800,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: (tpl.isApproved ? Colors.green : Colors.orange).withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            tpl.approvalStatus.toUpperCase(),
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: tpl.isApproved ? Colors.green.shade800 : Colors.orange.shade800,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList();
+              })(),
               onChanged: (newTemplate) {
                 if (newTemplate != null) {
                   setState(() {
@@ -962,6 +1073,49 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
             ),
           ),
         ),
+
+        if (isProd && widget.repository.activeTemplates.isEmpty) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.amber.shade50,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.amber.shade300),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.info_outline_rounded, color: Colors.amber.shade900, size: 20),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'No Production Templates Found',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.amber.shade900,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Your production WABA account has no templates cached locally yet. Go to "WhatsApp Templates" and tap "Sync with Meta" to import your approved production templates (e.g. diwali_spa_offer).',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.amber.shade900,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
 
         if (_selectedTemplate != null) ...[
           const SizedBox(height: 8),

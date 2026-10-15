@@ -18,7 +18,16 @@ class TemplatesScreen extends StatefulWidget {
 
 class _TemplatesScreenState extends State<TemplatesScreen> {
   String _selectedFilter = 'All'; // 'All', 'Approved', 'Pending', 'Draft'
+  final String _selectedModeFilter = 'Active'; // 'Active', 'Production', 'Test', 'All'
   bool _isSyncing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.repository.fetchTemplatesFromBackend();
+    });
+  }
 
   void _openCreateTemplate() {
     Navigator.of(context).push(
@@ -34,12 +43,13 @@ class _TemplatesScreenState extends State<TemplatesScreen> {
     if (!mounted) return;
     setState(() => _isSyncing = false);
 
+    final modeLabel = widget.repository.settings.isWhatsAppProductionMode ? 'Production' : 'Test Sandbox';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
           count > 0
-              ? 'Synced $count templates with Meta WhatsApp Business Platform.'
-              : 'Templates are up to date with backend store.',
+              ? 'Synced $count $modeLabel templates with Meta WhatsApp Business Platform.'
+              : '$modeLabel templates are up to date with backend store.',
         ),
         backgroundColor: AppColors.primarySageDark,
       ),
@@ -53,14 +63,27 @@ class _TemplatesScreenState extends State<TemplatesScreen> {
     return ListenableBuilder(
       listenable: widget.repository,
       builder: (context, _) {
-        final allTemplates = widget.repository.templates;
+        final List<WhatsAppTemplate> sourceTemplates;
+        if (_selectedModeFilter == 'Active') {
+          sourceTemplates = widget.repository.activeTemplates;
+        } else if (_selectedModeFilter == 'Production') {
+          sourceTemplates = widget.repository.templates.where((t) => t.isProduction).toList();
+        } else if (_selectedModeFilter == 'Test') {
+          sourceTemplates = widget.repository.templates.where((t) => t.isTest).toList();
+        } else {
+          sourceTemplates = widget.repository.templates;
+        }
 
-        final filtered = allTemplates.where((t) {
+        final filtered = sourceTemplates.where((t) {
           if (_selectedFilter == 'Approved') return t.isApproved;
           if (_selectedFilter == 'Pending') return t.isPending;
           if (_selectedFilter == 'Draft') return t.isDraft;
           return true;
         }).toList();
+
+        final approvedCount = sourceTemplates.where((t) => t.isApproved).length;
+        final pendingCount = sourceTemplates.where((t) => t.isPending).length;
+        final draftCount = sourceTemplates.where((t) => t.isDraft).length;
 
         final sampleClientName = widget.repository.customers.isNotEmpty
             ? widget.repository.customers.first.name
@@ -68,6 +91,10 @@ class _TemplatesScreenState extends State<TemplatesScreen> {
         final biz = widget.repository.settings.businessName.isNotEmpty
             ? widget.repository.settings.businessName
             : 'Our Spa & Wellness';
+
+        final activeModeLabel = widget.repository.settings.isWhatsAppProductionMode
+            ? 'PRODUCTION MODE ACTIVE (+91 95022 59203)'
+            : 'WHATSAPP CLOUD API • APPROVED TEMPLATE MANAGEMENT SYSTEM';
 
         return Scaffold(
           appBar: AppBar(
@@ -102,37 +129,40 @@ class _TemplatesScreenState extends State<TemplatesScreen> {
           body: SafeArea(
             child: Column(
               children: [
-                const DemoRibbon(
-                  label: 'WHATSAPP CLOUD API • APPROVED TEMPLATE MANAGEMENT SYSTEM',
+                DemoRibbon(
+                  label: activeModeLabel,
                 ),
 
-                // Filter chips
+                // Mode and Approval Filter chips
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  child: Row(
-                    children: [
-                      _buildFilterChip('All (${allTemplates.length})', 'All', isDark),
-                      const SizedBox(width: 8),
-                      _buildFilterChip(
-                        'Approved (${widget.repository.approvedTemplates.length})',
-                        'Approved',
-                        isDark,
-                        badgeColor: AppColors.success,
-                      ),
-                      const SizedBox(width: 8),
-                      _buildFilterChip(
-                        'Pending (${widget.repository.pendingTemplates.length})',
-                        'Pending',
-                        isDark,
-                        badgeColor: AppColors.accentGold,
-                      ),
-                      const SizedBox(width: 8),
-                      _buildFilterChip(
-                        'Draft (${widget.repository.draftTemplates.length})',
-                        'Draft',
-                        isDark,
-                      ),
-                    ],
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        _buildFilterChip('Active Mode (${sourceTemplates.length})', 'All', isDark),
+                        const SizedBox(width: 8),
+                        _buildFilterChip(
+                          'Approved ($approvedCount)',
+                          'Approved',
+                          isDark,
+                          badgeColor: AppColors.success,
+                        ),
+                        const SizedBox(width: 8),
+                        _buildFilterChip(
+                          'Pending ($pendingCount)',
+                          'Pending',
+                          isDark,
+                          badgeColor: AppColors.accentGold,
+                        ),
+                        const SizedBox(width: 8),
+                        _buildFilterChip(
+                          'Draft ($draftCount)',
+                          'Draft',
+                          isDark,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
 
@@ -142,26 +172,46 @@ class _TemplatesScreenState extends State<TemplatesScreen> {
                 Expanded(
                   child: filtered.isEmpty
                       ? Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              const Icon(Icons.style_outlined, size: 48, color: AppColors.textMuted),
-                              const SizedBox(height: 12),
-                              Text(
-                                'No ${_selectedFilter != 'All' ? _selectedFilter : ''} templates found',
-                                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-                              ),
-                              const SizedBox(height: 16),
-                              ElevatedButton.icon(
-                                onPressed: _openCreateTemplate,
-                                icon: const Icon(Icons.add_rounded),
-                                label: const Text('Create First Template'),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: AppColors.primarySage,
-                                  foregroundColor: Colors.white,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 32),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(Icons.style_outlined, size: 48, color: AppColors.textMuted),
+                                const SizedBox(height: 12),
+                                Text(
+                                  widget.repository.settings.isWhatsAppProductionMode
+                                      ? 'No Production Templates Cached'
+                                      : 'No ${_selectedFilter != 'All' ? _selectedFilter : ''} templates found',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
                                 ),
-                              ),
-                            ],
+                                const SizedBox(height: 8),
+                                Text(
+                                  widget.repository.settings.isWhatsAppProductionMode
+                                      ? 'Your production account has no local templates yet. Tap "Sync with Meta" to fetch your approved production templates (e.g. diwali_spa_offer) directly from Meta WhatsApp Business Platform.'
+                                      : 'Create your first promotional template or tap Sync to download approved templates from Meta.',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(fontSize: 13, color: AppColors.textMuted, height: 1.35),
+                                ),
+                                const SizedBox(height: 18),
+                                ElevatedButton.icon(
+                                  onPressed: _isSyncing ? null : _syncWithMeta,
+                                  icon: _isSyncing
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                        )
+                                      : const Icon(Icons.sync_rounded),
+                                  label: Text(_isSyncing ? 'Syncing...' : 'Sync with Meta'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: AppColors.primarySage,
+                                    foregroundColor: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         )
                       : ListView.separated(
@@ -290,6 +340,24 @@ class _TemplatesScreenState extends State<TemplatesScreen> {
                           child: Text(
                             tpl.category,
                             style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: AppColors.primarySageDark),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: tpl.isProduction
+                                ? AppColors.whatsApp.withValues(alpha: 0.15)
+                                : Colors.purple.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            tpl.isProduction ? 'PRODUCTION' : 'TEST',
+                            style: TextStyle(
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w700,
+                              color: tpl.isProduction ? AppColors.whatsApp : Colors.purple.shade700,
+                            ),
                           ),
                         ),
                       ],

@@ -251,46 +251,60 @@ export class TemplateService {
       };
     }
 
-    const url = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}/${targetWabaId}/message_templates?limit=100`;
-
     try {
       console.log(`[TemplateService] Fetching templates from Meta: mode=${mode} WABA=${targetWabaId}`);
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${targetToken}`,
-        },
-      });
+      
+      let nextUrl: string | null = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}/${targetWabaId}/message_templates?limit=100`;
+      const allMetaTemplates: any[] = [];
+      let pageCount = 0;
+      const MAX_PAGES = 25; // Safety cap to avoid runaway loops
 
-      const data = (await response.json()) as any;
-
-      if (!response.ok || data.error) {
-        const err = data.error || {};
-        console.warn(`[TemplateService] Meta API sync returned error:`, err);
-        return {
-          success: false,
-          syncedCount: 0,
-          templates: await templateStore.getAll(mode),
-          error: {
-            code: err.code || response.status,
-            type: err.type || 'OAuthException',
-            message: err.message || 'Error communicating with Meta WhatsApp Cloud API',
-            subcode: err.error_subcode,
-            fbtraceId: err.fbtrace_id,
+      while (nextUrl && pageCount < MAX_PAGES) {
+        pageCount++;
+        const response = await fetch(nextUrl, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${targetToken}`,
           },
-        };
+        });
+
+        const data = (await response.json()) as any;
+
+        if (!response.ok || data.error) {
+          const err = data.error || {};
+          console.warn(`[TemplateService] Meta API sync returned error:`, err);
+          return {
+            success: false,
+            syncedCount: 0,
+            templates: await templateStore.getAll(mode),
+            error: {
+              code: err.code || response.status,
+              type: err.type || 'OAuthException',
+              message: err.message || 'Error communicating with Meta WhatsApp Cloud API',
+              subcode: err.error_subcode,
+              fbtraceId: err.fbtrace_id,
+            },
+          };
+        }
+
+        if (Array.isArray(data.data)) {
+          allMetaTemplates.push(...data.data);
+        }
+
+        // Advance to next page if cursor exists
+        nextUrl = data.paging?.next || null;
       }
 
-      const metaTemplates: any[] = data.data || [];
       let syncedCount = 0;
       const now = new Date().toISOString();
 
-      for (const mt of metaTemplates) {
+      for (const mt of allMetaTemplates) {
         const metaName: string = mt.name;
         const metaStatus: MetaTemplateStatus = mt.status || 'APPROVED';
-        const metaCategory = mt.category || 'MARKETING';
-        const metaLang = mt.language || 'en_US';
-        const metaId = mt.id;
+        const metaCategory = (mt.category || 'MARKETING').toUpperCase() as any;
+        // Keep exact language code returned by Meta (e.g. 'en', 'en_US', 'hi')
+        const metaLang: string = (mt.language || 'en').trim();
+        const metaId: string | undefined = mt.id ? String(mt.id) : undefined;
 
         // Map Meta status to GlowBlast status
         let localStatus: TemplateApprovalStatus = 'pending_approval';
@@ -302,36 +316,47 @@ export class TemplateService {
           localStatus = 'disabled';
         }
 
-        const existing = await templateStore.getByName(metaName, mode);
+        // Extract body text from components if available
+        let bodyText = `Meta Template: ${metaName}`;
+        if (mt.components && Array.isArray(mt.components)) {
+          const bodyComp = mt.components.find((c: any) => c.type?.toUpperCase() === 'BODY');
+          if (bodyComp && bodyComp.text) {
+            bodyText = bodyComp.text;
+          }
+        }
+        const variables = this.extractVariables(bodyText);
+
+        const displayName = metaName
+          .split('_')
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(' ');
+
+        // Check if matching template already exists (matching name, mode, and language)
+        const existing = await templateStore.getByNameAndMode(metaName, mode, metaLang);
+
         if (existing) {
           await templateStore.update(existing.id, {
+            name: metaName,
+            displayName: existing.displayName || displayName,
+            category: metaCategory,
+            language: metaLang,
             status: localStatus,
             metaStatus,
             metaTemplateId: metaId,
-            language: metaLang,
+            body: bodyText,
+            variables,
             wabaId: targetWabaId,
             mode,
             lastSyncedAt: now,
           });
           syncedCount++;
         } else {
-          // Extract body text from components if available
-          let bodyText = `Meta Template: ${metaName}`;
-          if (mt.components && Array.isArray(mt.components)) {
-            const bodyComp = mt.components.find((c: any) => c.type === 'BODY');
-            if (bodyComp && bodyComp.text) {
-              bodyText = bodyComp.text;
-            }
-          }
-
           const templateIdPrefix = isProd ? 'tpl_prod_' : 'tpl_';
+          const cleanLang = metaLang.toLowerCase().replace(/[^a-z0-9]/g, '_');
           const newTpl: WhatsAppTemplate = {
-            id: `${templateIdPrefix}${metaName}`,
+            id: `${templateIdPrefix}${metaName}_${cleanLang}`,
             name: metaName,
-            displayName: metaName
-              .split('_')
-              .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-              .join(' '),
+            displayName,
             description: `Imported from Meta WhatsApp Business Platform (${metaStatus} - ${mode} WABA)`,
             category: metaCategory,
             language: metaLang,
@@ -339,7 +364,7 @@ export class TemplateService {
             metaStatus,
             metaTemplateId: metaId,
             body: bodyText,
-            variables: this.extractVariables(bodyText),
+            variables,
             wabaId: targetWabaId,
             mode,
             createdAt: now,
@@ -351,7 +376,7 @@ export class TemplateService {
         }
       }
 
-      console.log(`[TemplateService] Successfully synced ${syncedCount} templates from Meta (${mode})`);
+      console.log(`[TemplateService] Successfully synced ${syncedCount} templates from Meta (${mode}) across ${pageCount} page(s)`);
       return {
         success: true,
         syncedCount,

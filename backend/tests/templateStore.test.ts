@@ -1,4 +1,4 @@
-import { test, describe, beforeEach, after } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert';
 import { templateStore, TemplateStore, SEED_TEMPLATES } from '../src/store/templateStore';
 import { TemplateService } from '../src/services/templateService';
@@ -7,8 +7,8 @@ import { getPool } from '../src/db/pool';
 import { WhatsAppTemplate } from '../src/types/template';
 
 describe('PostgreSQL Template Store & Meta Synchronization Suite', () => {
-  beforeEach(async () => {
-    // Clean and re-seed database before each test
+  before(async () => {
+    // Seed database before test suite runs
     await templateStore.seedDefaults();
   });
 
@@ -215,5 +215,290 @@ describe('PostgreSQL Template Store & Meta Synchronization Suite', () => {
         return true;
       }
     );
+  });
+
+  test('7. Production synchronization preserves exact language "en", production WABA 3226959717495309, and isolates test diwali_offer', async () => {
+    const originalProdWaba = env.PROD_WHATSAPP_BUSINESS_ACCOUNT_ID;
+    const originalProdToken = env.PROD_WHATSAPP_ACCESS_TOKEN;
+    const originalFetch = globalThis.fetch;
+
+    try {
+      (env as any).PROD_WHATSAPP_BUSINESS_ACCOUNT_ID = '3226959717495309';
+      (env as any).PROD_WHATSAPP_ACCESS_TOKEN = 'test_prod_token_valid';
+
+      // Ensure test template diwali_offer exists and belongs to test mode
+      const oldTestTpl = await templateStore.getByName('diwali_offer', 'test');
+      assert.ok(oldTestTpl, 'Old test template diwali_offer must exist');
+      assert.strictEqual(oldTestTpl.mode, 'test');
+
+      // Mock Meta returning diwali_spa_offer with language 'en' (NOT en_US)
+      globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        const urlStr = url.toString();
+        if (urlStr.includes('3226959717495309/message_templates')) {
+          assert.strictEqual(
+            init?.headers && (init.headers as any).Authorization,
+            'Bearer test_prod_token_valid'
+          );
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: [
+                {
+                  id: '1851386776000198',
+                  name: 'diwali_spa_offer',
+                  status: 'APPROVED',
+                  category: 'MARKETING',
+                  language: 'en', // Exact Meta language returned
+                  components: [
+                    {
+                      type: 'BODY',
+                      text: 'Celebrate Diwali with 40% off our luxurious spa treatments at {business_name}, {name}!',
+                    },
+                  ],
+                },
+              ],
+            }),
+          } as any;
+        }
+        return { ok: false, status: 404, json: async () => ({}) } as any;
+      }) as any;
+
+      const result = await TemplateService.syncFromMeta('production');
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.syncedCount, 1);
+
+      // Verify production record attributes
+      const prodRecord = await templateStore.getByNameAndMode('diwali_spa_offer', 'production', 'en');
+      assert.ok(prodRecord, 'diwali_spa_offer record must be persisted in production mode with language en');
+      assert.strictEqual(prodRecord.name, 'diwali_spa_offer');
+      assert.strictEqual(prodRecord.language, 'en', 'Must preserve exact language "en" returned by Meta');
+      assert.strictEqual(prodRecord.status, 'approved');
+      assert.strictEqual(prodRecord.metaStatus, 'APPROVED');
+      assert.strictEqual(prodRecord.metaTemplateId, '1851386776000198');
+      assert.strictEqual(prodRecord.mode, 'production');
+      assert.strictEqual(prodRecord.wabaId, '3226959717495309');
+      assert.strictEqual(prodRecord.category, 'MARKETING');
+
+      // Verify old test template diwali_offer is untouched
+      const testRecordAfter = await templateStore.getByName('diwali_offer', 'test');
+      assert.ok(testRecordAfter);
+      assert.strictEqual(testRecordAfter.mode, 'test');
+      assert.strictEqual(testRecordAfter.wabaId, oldTestTpl.wabaId, 'Test WABA ID must remain untouched');
+      assert.notStrictEqual(testRecordAfter.id, prodRecord.id);
+
+      // Verify mode isolation: production template diwali_spa_offer does NOT appear in test queries
+      const testList = await TemplateService.listTemplates('test');
+      assert.strictEqual(testList.some((t) => t.name === 'diwali_spa_offer'), false);
+
+      const prodList = await TemplateService.listTemplates('production');
+      assert.strictEqual(prodList.some((t) => t.name === 'diwali_spa_offer'), true);
+      assert.strictEqual(prodList.some((t) => t.name === 'diwali_offer'), false);
+    } finally {
+      (env as any).PROD_WHATSAPP_BUSINESS_ACCOUNT_ID = originalProdWaba;
+      (env as any).PROD_WHATSAPP_ACCESS_TOKEN = originalProdToken;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('8. Meta Graph API pagination fetches all pages and persists all returned templates', async () => {
+    const originalProdWaba = env.PROD_WHATSAPP_BUSINESS_ACCOUNT_ID;
+    const originalProdToken = env.PROD_WHATSAPP_ACCESS_TOKEN;
+    const originalFetch = globalThis.fetch;
+
+    try {
+      (env as any).PROD_WHATSAPP_BUSINESS_ACCOUNT_ID = '3226959717495309';
+      (env as any).PROD_WHATSAPP_ACCESS_TOKEN = 'test_prod_token_pagination';
+
+      const page1Url = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}/3226959717495309/message_templates?limit=100`;
+      const page2Url = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}/3226959717495309/message_templates?limit=100&after=CURSOR_PAGE_2`;
+
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        const urlStr = url.toString();
+        if (urlStr === page1Url) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: [
+                {
+                  id: 'meta_p1_001',
+                  name: 'spring_rejuvenation_page1',
+                  status: 'APPROVED',
+                  category: 'MARKETING',
+                  language: 'en',
+                  components: [{ type: 'BODY', text: 'Spring offer {name}' }],
+                },
+              ],
+              paging: {
+                next: page2Url,
+              },
+            }),
+          } as any;
+        } else if (urlStr === page2Url) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              data: [
+                {
+                  id: 'meta_p2_002',
+                  name: 'summer_glow_page2',
+                  status: 'APPROVED',
+                  category: 'MARKETING',
+                  language: 'en',
+                  components: [{ type: 'BODY', text: 'Summer glow {name}' }],
+                },
+              ],
+              paging: {},
+            }),
+          } as any;
+        }
+        return { ok: false, status: 404, json: async () => ({}) } as any;
+      }) as any;
+
+      const result = await TemplateService.syncFromMeta('production');
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.syncedCount, 2, 'Must have synced templates across both pages');
+
+      const p1Tpl = await templateStore.getByNameAndMode('spring_rejuvenation_page1', 'production');
+      assert.ok(p1Tpl, 'Page 1 template must be saved');
+      assert.strictEqual(p1Tpl.metaTemplateId, 'meta_p1_001');
+
+      const p2Tpl = await templateStore.getByNameAndMode('summer_glow_page2', 'production');
+      assert.ok(p2Tpl, 'Page 2 template must be saved via pagination cursor');
+      assert.strictEqual(p2Tpl.metaTemplateId, 'meta_p2_002');
+    } finally {
+      (env as any).PROD_WHATSAPP_BUSINESS_ACCOUNT_ID = originalProdWaba;
+      (env as any).PROD_WHATSAPP_ACCESS_TOKEN = originalProdToken;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('9. Multi-language templates with same name are stored without unique constraint collisions', async () => {
+    const originalProdWaba = env.PROD_WHATSAPP_BUSINESS_ACCOUNT_ID;
+    const originalProdToken = env.PROD_WHATSAPP_ACCESS_TOKEN;
+    const originalFetch = globalThis.fetch;
+
+    try {
+      (env as any).PROD_WHATSAPP_BUSINESS_ACCOUNT_ID = '3226959717495309';
+      (env as any).PROD_WHATSAPP_ACCESS_TOKEN = 'test_prod_token_multilang';
+
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [
+              {
+                id: 'meta_multi_en',
+                name: 'festival_multilang_offer',
+                status: 'APPROVED',
+                category: 'MARKETING',
+                language: 'en',
+                components: [{ type: 'BODY', text: 'Celebrate with us in English, {name}!' }],
+              },
+              {
+                id: 'meta_multi_hi',
+                name: 'festival_multilang_offer',
+                status: 'APPROVED',
+                category: 'MARKETING',
+                language: 'hi',
+                components: [{ type: 'BODY', text: 'हमारे साथ त्योहार मनाएं, {name}!' }],
+              },
+            ],
+          }),
+        } as any;
+      }) as any;
+
+      const result = await TemplateService.syncFromMeta('production');
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.syncedCount, 2);
+
+      const enVariant = await templateStore.getByNameAndMode('festival_multilang_offer', 'production', 'en');
+      assert.ok(enVariant);
+      assert.strictEqual(enVariant.language, 'en');
+      assert.strictEqual(enVariant.metaTemplateId, 'meta_multi_en');
+
+      const hiVariant = await templateStore.getByNameAndMode('festival_multilang_offer', 'production', 'hi');
+      assert.ok(hiVariant);
+      assert.strictEqual(hiVariant.language, 'hi');
+      assert.strictEqual(hiVariant.metaTemplateId, 'meta_multi_hi');
+
+      assert.notStrictEqual(enVariant.id, hiVariant.id, 'Distinct language variants must have distinct IDs');
+    } finally {
+      (env as any).PROD_WHATSAPP_BUSINESS_ACCOUNT_ID = originalProdWaba;
+      (env as any).PROD_WHATSAPP_ACCESS_TOKEN = originalProdToken;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('10. Updating existing template on sync refreshes body text, variables, and status', async () => {
+    // Insert a draft template
+    const draftTpl: WhatsAppTemplate = {
+      id: 'tpl_prod_refresh_test',
+      name: 'refresh_test_template',
+      displayName: 'Refresh Test',
+      category: 'MARKETING',
+      language: 'en',
+      status: 'draft',
+      metaStatus: 'NOT_SUBMITTED',
+      body: 'Old placeholder body',
+      variables: [],
+      mode: 'production',
+      wabaId: '3226959717495309',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await templateStore.create(draftTpl);
+
+    const originalProdWaba = env.PROD_WHATSAPP_BUSINESS_ACCOUNT_ID;
+    const originalProdToken = env.PROD_WHATSAPP_ACCESS_TOKEN;
+    const originalFetch = globalThis.fetch;
+
+    try {
+      (env as any).PROD_WHATSAPP_BUSINESS_ACCOUNT_ID = '3226959717495309';
+      (env as any).PROD_WHATSAPP_ACCESS_TOKEN = 'test_prod_token_refresh';
+
+      globalThis.fetch = (async () => {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [
+              {
+                id: 'meta_refresh_approved_123',
+                name: 'refresh_test_template',
+                status: 'APPROVED',
+                category: 'MARKETING',
+                language: 'en',
+                components: [
+                  {
+                    type: 'BODY',
+                    text: 'Approved brand new body for {name} with 50% discount at {business_name}!',
+                  },
+                ],
+              },
+            ],
+          }),
+        } as any;
+      }) as any;
+
+      const result = await TemplateService.syncFromMeta('production');
+      assert.strictEqual(result.success, true);
+
+      const refreshed = await templateStore.getById('tpl_prod_refresh_test');
+      assert.ok(refreshed);
+      assert.strictEqual(refreshed.status, 'approved');
+      assert.strictEqual(refreshed.metaStatus, 'APPROVED');
+      assert.strictEqual(refreshed.metaTemplateId, 'meta_refresh_approved_123');
+      assert.ok(refreshed.body.includes('Approved brand new body for {name}'));
+      assert.ok(refreshed.variables.includes('name'));
+      assert.ok(refreshed.variables.includes('business_name'));
+    } finally {
+      (env as any).PROD_WHATSAPP_BUSINESS_ACCOUNT_ID = originalProdWaba;
+      (env as any).PROD_WHATSAPP_ACCESS_TOKEN = originalProdToken;
+      globalThis.fetch = originalFetch;
+    }
   });
 });

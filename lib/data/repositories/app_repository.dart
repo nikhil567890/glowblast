@@ -52,8 +52,22 @@ class AppRepository extends ChangeNotifier {
   List<CustomerGroup> get groups => List.unmodifiable(_groups);
   List<WhatsAppTemplate> get templates => List.unmodifiable(_templates);
   List<WhatsAppTemplate> get approvedTemplates => _templates.where((t) => t.isApproved).toList();
-  List<WhatsAppTemplate> get pendingTemplates => _templates.where((t) => t.isPending).toList();
-  List<WhatsAppTemplate> get draftTemplates => _templates.where((t) => t.isDraft).toList();
+
+  /// Returns templates matching the active messaging mode (Production vs Developer Test vs Demo)
+  List<WhatsAppTemplate> get activeTemplates {
+    if (_settings.isWhatsAppProductionMode) {
+      final prodList = _templates.where((t) => t.mode == 'production').toList();
+      return List.unmodifiable(prodList);
+    } else if (_settings.isWhatsAppTestMode) {
+      final testList = _templates.where((t) => t.mode == 'test' || t.mode == 'all').toList();
+      return List.unmodifiable(testList.isNotEmpty ? testList : _templates);
+    }
+    return List.unmodifiable(_templates);
+  }
+
+  /// Returns approved templates matching the active messaging mode
+  List<WhatsAppTemplate> get activeApprovedTemplates =>
+      activeTemplates.where((t) => t.isApproved).toList();
 
   WhatsAppTemplate? getTemplateById(String id) {
     try {
@@ -63,7 +77,25 @@ class AppRepository extends ChangeNotifier {
     }
   }
 
-  WhatsAppTemplate? getTemplateByName(String name) {
+  WhatsAppTemplate? getTemplateByName(String name, {String? mode}) {
+    final targetMode = mode ?? (_settings.isWhatsAppProductionMode ? 'production' : (_settings.isWhatsAppTestMode ? 'test' : null));
+    if (targetMode == 'production') {
+      try {
+        return _templates.firstWhere(
+          (t) => t.name.toLowerCase() == name.toLowerCase() && t.mode == 'production',
+        );
+      } catch (_) {
+        return null;
+      }
+    } else if (targetMode != null) {
+      try {
+        return _templates.firstWhere(
+          (t) => t.name.toLowerCase() == name.toLowerCase() && (t.mode == targetMode || t.mode == 'all'),
+        );
+      } catch (_) {
+        return null;
+      }
+    }
     try {
       return _templates.firstWhere((t) => t.name.toLowerCase() == name.toLowerCase());
     } catch (_) {
@@ -531,21 +563,51 @@ class AppRepository extends ChangeNotifier {
     await prefs.setString(_keyTemplates, jsonEncode(_templates.map((t) => t.toJson()).toList()));
   }
 
+  /// Fetches templates from backend for the specified or active mode without triggering Meta API sync
+  Future<List<WhatsAppTemplate>> fetchTemplatesFromBackend({String? mode}) async {
+    final effectiveMode = mode ?? (_settings.isWhatsAppProductionMode ? 'production' : 'test');
+    try {
+      final backendTemplates = await backendClient.getTemplates(mode: effectiveMode);
+      if (backendTemplates.isEmpty) return activeTemplates;
+
+      for (final raw in backendTemplates) {
+        final tpl = WhatsAppTemplate.fromJson(raw);
+        final idx = _templates.indexWhere(
+          (t) => (t.id == tpl.id) || (t.name.toLowerCase() == tpl.name.toLowerCase() && t.mode == tpl.mode && t.language == tpl.language),
+        );
+        if (idx != -1) {
+          _templates[idx] = tpl;
+        } else {
+          _templates.add(tpl);
+        }
+      }
+
+      notifyListeners();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_keyTemplates, jsonEncode(_templates.map((t) => t.toJson()).toList()));
+      return activeTemplates;
+    } catch (_) {
+      return activeTemplates;
+    }
+  }
+
   Future<int> syncTemplatesWithBackend({String? mode}) async {
     final effectiveMode = mode ?? (_settings.isWhatsAppProductionMode ? 'production' : 'test');
     try {
       // 1. Trigger sync from Meta for the active mode
-      await backendClient.syncTemplates(mode: effectiveMode);
+      final syncRes = await backendClient.syncTemplates(mode: effectiveMode);
 
       // 2. Fetch list for this mode from backend
       final backendTemplates = await backendClient.getTemplates(mode: effectiveMode);
-      if (backendTemplates.isEmpty) return 0;
+      if (backendTemplates.isEmpty) {
+        return (syncRes['syncedCount'] as num?)?.toInt() ?? 0;
+      }
 
       int updatedCount = 0;
       for (final raw in backendTemplates) {
         final tpl = WhatsAppTemplate.fromJson(raw);
         final idx = _templates.indexWhere(
-          (t) => (t.id == tpl.id) || (t.name.toLowerCase() == tpl.name.toLowerCase() && t.mode == tpl.mode),
+          (t) => (t.id == tpl.id) || (t.name.toLowerCase() == tpl.name.toLowerCase() && t.mode == tpl.mode && t.language == tpl.language),
         );
         if (idx != -1) {
           _templates[idx] = tpl;

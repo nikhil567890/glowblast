@@ -53,6 +53,7 @@ export const SEED_TEMPLATES: WhatsAppTemplate[] = [
       business_name: 'Luxspa & Wellness',
     },
     mode: 'test',
+    wabaId: '1633948435034571',
     createdAt: '2026-02-01T00:00:00.000Z',
     updatedAt: '2026-02-01T00:00:00.000Z',
   },
@@ -164,33 +165,41 @@ export class TemplateStore {
     if (this.seeded) return;
     const pool = getPool();
 
-    for (const tpl of SEED_TEMPLATES) {
-      await pool.query(
-        `INSERT INTO whatsapp_templates (
-          id, name, display_name, description, category, language,
-          status, meta_status, body, variables, example_values,
-          waba_id, mode, created_at, updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
-        ON CONFLICT (id) DO NOTHING;`,
-        [
-          tpl.id,
-          tpl.name,
-          tpl.displayName,
-          tpl.description || null,
-          tpl.category,
-          tpl.language,
-          tpl.status,
-          tpl.metaStatus,
-          tpl.body,
-          JSON.stringify(tpl.variables || []),
-          tpl.exampleValues ? JSON.stringify(tpl.exampleValues) : null,
-          tpl.wabaId || null,
-          tpl.mode || 'test',
-        ]
-      );
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        for (const tpl of SEED_TEMPLATES) {
+          await pool.query(
+            `INSERT INTO whatsapp_templates (
+              id, name, display_name, description, category, language,
+              status, meta_status, body, variables, example_values,
+              waba_id, mode, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+            ON CONFLICT (id) DO NOTHING;`,
+            [
+              tpl.id,
+              tpl.name,
+              tpl.displayName,
+              tpl.description || null,
+              tpl.category,
+              tpl.language,
+              tpl.status,
+              tpl.metaStatus,
+              tpl.body,
+              JSON.stringify(tpl.variables || []),
+              tpl.exampleValues ? JSON.stringify(tpl.exampleValues) : null,
+              tpl.wabaId || null,
+              tpl.mode || 'test',
+            ]
+          );
+        }
+        this.seeded = true;
+        return;
+      } catch (err: any) {
+        if (attempt === 2) throw err;
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      }
     }
-    this.seeded = true;
   }
 
   /**
@@ -232,8 +241,21 @@ export class TemplateStore {
 
   /**
    * Retrieves a template by Meta name, strictly respecting mode isolation.
+  /**
+   * Retrieves a template by Meta name, strictly respecting mode isolation.
    */
   public async getByName(name: string, mode?: 'test' | 'production'): Promise<WhatsAppTemplate | undefined> {
+    return this.getByNameAndMode(name, mode);
+  }
+
+  /**
+   * Retrieves a template by Meta name, mode, and optional language.
+   */
+  public async getByNameAndMode(
+    name: string,
+    mode?: 'test' | 'production',
+    language?: string
+  ): Promise<WhatsAppTemplate | undefined> {
     await this.seedDefaults();
     const pool = getPool();
 
@@ -241,10 +263,18 @@ export class TemplateStore {
     const params: any[] = [name.trim()];
 
     if (mode === 'production') {
-      query += ` AND mode = 'production'`;
+      params.push('production');
+      query += ` AND mode = $${params.length}`;
     } else if (mode === 'test') {
-      query += ` AND mode = 'test'`;
+      params.push('test');
+      query += ` AND mode = $${params.length}`;
     }
+
+    if (language && language.trim().length > 0) {
+      params.push(language.trim());
+      query += ` AND LOWER(language) = LOWER($${params.length})`;
+    }
+
     query += ` ORDER BY updated_at DESC LIMIT 1;`;
 
     const res = await pool.query(query, params);
@@ -253,12 +283,13 @@ export class TemplateStore {
   }
 
   /**
-   * Retrieves a template by ID or Meta name, strictly respecting mode isolation.
+   * Retrieves a template by ID or Meta name, strictly respecting mode isolation and optional language.
    * In production mode, sandbox templates can NEVER be returned.
    */
   public async findByIdOrName(
     idOrName: string,
-    mode?: 'test' | 'production'
+    mode?: 'test' | 'production',
+    language?: string
   ): Promise<WhatsAppTemplate | undefined> {
     await this.seedDefaults();
     const pool = getPool();
@@ -268,10 +299,18 @@ export class TemplateStore {
     const params: any[] = [clean];
 
     if (mode === 'production') {
-      query += ` AND mode = 'production'`;
+      params.push('production');
+      query += ` AND mode = $${params.length}`;
     } else if (mode === 'test') {
-      query += ` AND mode = 'test'`;
+      params.push('test');
+      query += ` AND mode = $${params.length}`;
     }
+
+    if (language && language.trim().length > 0) {
+      params.push(language.trim());
+      query += ` AND LOWER(language) = LOWER($${params.length})`;
+    }
+
     query += ` ORDER BY (CASE WHEN id = $1 THEN 0 ELSE 1 END), updated_at DESC LIMIT 1;`;
 
     const res = await pool.query(query, params);
@@ -309,9 +348,22 @@ export class TemplateStore {
 
   /**
    * Inserts or upserts a template into PostgreSQL.
+   * Resolves existing row by (LOWER(name), mode, language) to avoid unique constraint collisions
+   * across different ID generation schemes.
    */
   public async create(tpl: WhatsAppTemplate): Promise<WhatsAppTemplate> {
     const pool = getPool();
+
+    const tplLanguage = tpl.language || 'en_US';
+    const tplMode = tpl.mode || 'test';
+
+    // Check if an existing row matches (LOWER(name), mode, language) under any ID
+    const existingRow = await pool.query<{ id: string }>(
+      `SELECT id FROM whatsapp_templates WHERE LOWER(name) = LOWER($1) AND mode = $2 AND LOWER(language) = LOWER($3) LIMIT 1;`,
+      [tpl.name.trim(), tplMode, tplLanguage.trim()]
+    );
+
+    const effectiveId = existingRow.rows.length > 0 ? existingRow.rows[0].id : tpl.id;
 
     const res = await pool.query(
       `INSERT INTO whatsapp_templates (
@@ -338,12 +390,12 @@ export class TemplateStore {
         updated_at = NOW()
       RETURNING *;`,
       [
-        tpl.id,
+        effectiveId,
         tpl.name,
         tpl.displayName,
         tpl.description || null,
         tpl.category,
-        tpl.language || 'en_US',
+        tplLanguage,
         tpl.status,
         tpl.metaStatus,
         tpl.metaTemplateId || null,
@@ -351,7 +403,7 @@ export class TemplateStore {
         JSON.stringify(tpl.variables || []),
         tpl.exampleValues ? JSON.stringify(tpl.exampleValues) : null,
         tpl.wabaId || null,
-        tpl.mode || 'test',
+        tplMode,
         tpl.lastSyncedAt ? new Date(tpl.lastSyncedAt) : null,
         tpl.createdAt ? new Date(tpl.createdAt) : new Date(),
       ]

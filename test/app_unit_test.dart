@@ -495,6 +495,64 @@ void main() {
       expect(restored.mode, 'production');
       expect(restored.isProduction, isTrue);
     });
+
+    test('Production mode with zero templates returns empty activeTemplates without falling back to test templates', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_settings_v3': '{"fullName":"Nikhil","businessName":"Spa","phone":"+91 95022 59203","messagingMode":"production"}',
+        // Templates list containing only test templates
+        'glowblast_templates_v3': '[{"id":"tpl_hello","name":"hello_world","displayName":"Hello World","status":"approved","body":"Hello","mode":"test","language":"en_US"},{"id":"tpl_diwali","name":"diwali_offer","displayName":"Diwali Offer","status":"draft","body":"Offer","mode":"test","language":"en_US"}]',
+      });
+
+      final repository = AppRepository();
+      await repository.init();
+
+      expect(repository.settings.isWhatsAppProductionMode, isTrue);
+      // activeTemplates MUST be completely empty when no production templates exist
+      expect(repository.activeTemplates, isEmpty);
+      expect(repository.activeApprovedTemplates, isEmpty);
+
+      // getTemplateByName MUST return null for test templates when in production mode
+      expect(repository.getTemplateByName('hello_world'), isNull);
+      expect(repository.getTemplateByName('diwali_offer'), isNull);
+    });
+
+    test('Production mode retrieves approved diwali_spa_offer with language en and WABA 3226959717495309 while isolating test templates', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_settings_v3': '{"fullName":"Nikhil","businessName":"Spa","phone":"+91 95022 59203","messagingMode":"production"}',
+        'glowblast_templates_v3': '[{"id":"tpl_diwali","name":"diwali_offer","displayName":"Diwali Offer","status":"draft","body":"Offer","mode":"test","wabaId":"1633948435034571","language":"en_US"},{"id":"tpl_prod_diwali_spa_offer_en","name":"diwali_spa_offer","displayName":"Diwali Spa Offer","status":"approved","metaStatus":"APPROVED","metaTemplateId":"1851386776000198","body":"Celebrate Diwali with 40% off","mode":"production","wabaId":"3226959717495309","language":"en"}]',
+      });
+
+      final repository = AppRepository();
+      await repository.init();
+
+      expect(repository.settings.isWhatsAppProductionMode, isTrue);
+
+      // Verify activeTemplates returns ONLY the production template
+      expect(repository.activeTemplates.length, 1);
+      final prodTpl = repository.activeTemplates.first;
+      expect(prodTpl.name, 'diwali_spa_offer');
+      expect(prodTpl.language, 'en'); // Exact language 'en'
+      expect(prodTpl.status, 'approved');
+      expect(prodTpl.metaStatus, 'APPROVED');
+      expect(prodTpl.metaTemplateId, '1851386776000198');
+      expect(prodTpl.wabaId, '3226959717495309');
+      expect(prodTpl.isProduction, isTrue);
+
+      // activeApprovedTemplates must contain it
+      expect(repository.activeApprovedTemplates.length, 1);
+      expect(repository.activeApprovedTemplates.first.name, 'diwali_spa_offer');
+
+      // getTemplateByName resolves diwali_spa_offer
+      final fetched = repository.getTemplateByName('diwali_spa_offer');
+      expect(fetched, isNotNull);
+      expect(fetched!.name, 'diwali_spa_offer');
+      expect(fetched.isProduction, isTrue);
+
+      // Old test template diwali_offer is NOT accessible in production mode
+      expect(repository.getTemplateByName('diwali_offer'), isNull);
+    });
   });
 }
 

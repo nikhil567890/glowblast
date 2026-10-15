@@ -526,6 +526,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 await widget.repository.updateSettings(updated);
                                 if (set.first != 'demo') {
                                   _checkBackendStatus();
+                                  final effectiveMode = set.first == 'production' ? 'production' : 'test';
+                                  widget.repository.fetchTemplatesFromBackend(mode: effectiveMode);
                                 }
                               },
                             ),

@@ -60,6 +60,15 @@ class _CustomersScreenState extends State<CustomersScreen> {
     var list = customers;
 
     switch (_selectedFilter) {
+      case 'Marketing Opt-In':
+        list = customers.where((c) => !c.isOptedOut && c.hasMarketingConsent).toList();
+        break;
+      case 'Utility Only':
+        list = customers.where((c) => !c.isOptedOut && c.hasUtilityConsent).toList();
+        break;
+      case 'Unconsented':
+        list = customers.where((c) => !c.isOptedOut && !c.hasMarketingConsent && !c.hasUtilityConsent).toList();
+        break;
       case 'Recently Added':
         list = widget.repository.recentlyAddedCustomers;
         break;
@@ -208,7 +217,11 @@ class _CustomersScreenState extends State<CustomersScreen> {
                     children: [
                       _buildFilterChip('All', 'All (${allCustomers.length})', isDark),
                       const SizedBox(width: 8),
-                      _buildFilterChip('Recently Added', 'Recently Added (${repo.recentlyAddedCustomers.length})', isDark),
+                      _buildFilterChip('Marketing Opt-In', 'Marketing Opt-In (${repo.marketingConsentedCustomers.length})', isDark),
+                      const SizedBox(width: 8),
+                      _buildFilterChip('Utility Only', 'Utility Only (${repo.utilityConsentedCustomers.length})', isDark),
+                      const SizedBox(width: 8),
+                      _buildFilterChip('Unconsented', 'Unconsented (${allCustomers.where((c) => !c.isOptedOut && !c.hasMarketingConsent && !c.hasUtilityConsent).length})', isDark),
                       const SizedBox(width: 8),
                       _buildFilterChip('Opted-Out', 'Opted-Out (${repo.optedOutCustomersCount})', isDark),
                     ],
@@ -298,6 +311,15 @@ class _CustomersScreenState extends State<CustomersScreen> {
                                               if (customer.isOptedOut) ...[
                                                 const SizedBox(width: 6),
                                                 StatusBadge.optedOut(),
+                                              ] else if (customer.hasMarketingConsent) ...[
+                                                const SizedBox(width: 6),
+                                                StatusBadge.marketingConsent(),
+                                              ] else if (customer.hasUtilityConsent) ...[
+                                                const SizedBox(width: 6),
+                                                StatusBadge.utilityConsent(),
+                                              ] else ...[
+                                                const SizedBox(width: 6),
+                                                StatusBadge.noConsent(),
                                               ],
                                             ],
                                           ),

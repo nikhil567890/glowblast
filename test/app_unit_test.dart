@@ -554,6 +554,115 @@ void main() {
       expect(repository.getTemplateByName('diwali_offer'), isNull);
     });
   });
+
+  group('Customer WhatsApp Consent Management Tests', () {
+    test('Customer model defaults to false for marketing and utility consent (no auto-consent)', () {
+      final customer = Customer(
+        id: 'cust_new_1',
+        name: 'Aarav Patel',
+        phone: '+91 98765 43210',
+      );
+
+      expect(customer.hasMarketingConsent, isFalse);
+      expect(customer.hasUtilityConsent, isFalse);
+      expect(customer.hasWhatsAppConsent, isFalse);
+      expect(customer.marketingConsentRecordedAt, isNull);
+      expect(customer.utilityConsentRecordedAt, isNull);
+      expect(customer.marketingConsentSource, isNull);
+      expect(customer.utilityConsentSource, isNull);
+    });
+
+    test('Customer serializes and deserializes marketing and utility consent with metadata', () {
+      final now = DateTime.now();
+      final customer = Customer(
+        id: 'cust_consented_1',
+        name: 'Pooja Verma',
+        phone: '+91 95022 59203',
+        hasMarketingConsent: true,
+        marketingConsentRecordedAt: now,
+        marketingConsentSource: 'Front Desk Digital Tablet',
+        marketingConsentEvidence: 'Form #W-2026-001',
+        marketingConsentTextVersion: 'v2026.1_festive',
+        hasUtilityConsent: true,
+        utilityConsentRecordedAt: now,
+        utilityConsentSource: 'Online Booking Slip',
+        utilityConsentEvidence: 'Booking #BK-9912',
+        utilityConsentTextVersion: 'v2026.1_appointment',
+      );
+
+      final json = customer.toJson();
+      expect(json['hasMarketingConsent'], isTrue);
+      expect(json['hasWhatsAppConsent'], isTrue);
+      expect(json['hasUtilityConsent'], isTrue);
+      expect(json['marketingConsentSource'], 'Front Desk Digital Tablet');
+      expect(json['marketingConsentEvidence'], 'Form #W-2026-001');
+      expect(json['marketingConsentTextVersion'], 'v2026.1_festive');
+
+      final reconstructed = Customer.fromJson(json);
+      expect(reconstructed.id, 'cust_consented_1');
+      expect(reconstructed.hasMarketingConsent, isTrue);
+      expect(reconstructed.hasUtilityConsent, isTrue);
+      expect(reconstructed.hasWhatsAppConsent, isTrue);
+      expect(reconstructed.marketingConsentSource, 'Front Desk Digital Tablet');
+      expect(reconstructed.marketingConsentEvidence, 'Form #W-2026-001');
+      expect(reconstructed.utilityConsentEvidence, 'Booking #BK-9912');
+    });
+
+    test('AppRepository recordCustomerConsent updates local state and filters lists correctly', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': '[{"id":"cust_test_1","name":"Client 1","phone":"+91 98765 43210","hasMarketingConsent":false,"hasUtilityConsent":false},{"id":"cust_test_2","name":"Client 2","phone":"+91 98765 43211","hasMarketingConsent":false,"hasUtilityConsent":false}]',
+      });
+
+      final repository = AppRepository();
+      await repository.init();
+
+      expect(repository.marketingConsentedCustomers, isEmpty);
+      expect(repository.utilityConsentedCustomers, isEmpty);
+
+      // Record Marketing Consent for Client 1
+      await repository.recordCustomerConsent(
+        customerId: 'cust_test_1',
+        category: 'marketing',
+        status: 'opted_in',
+        source: 'Front Desk Tablet',
+        evidence: 'Signature #4401',
+        consentTextVersion: 'v2026.1_promo',
+      );
+
+      expect(repository.marketingConsentedCustomers.length, 1);
+      expect(repository.marketingConsentedCustomers.first.id, 'cust_test_1');
+      expect(repository.marketingConsentedCustomers.first.hasMarketingConsent, isTrue);
+      expect(repository.marketingConsentedCustomers.first.hasUtilityConsent, isFalse);
+      expect(repository.utilityConsentedCustomers, isEmpty);
+
+      // Record Utility Consent for Client 2
+      await repository.recordCustomerConsent(
+        customerId: 'cust_test_2',
+        category: 'utility',
+        status: 'opted_in',
+        source: 'Booking Slip',
+        evidence: 'Slip #BS-200',
+        consentTextVersion: 'v2026.1_utility',
+      );
+
+      expect(repository.marketingConsentedCustomers.length, 1);
+      expect(repository.utilityConsentedCustomers.length, 1);
+      expect(repository.utilityConsentedCustomers.first.id, 'cust_test_2');
+
+      // Opt out Client 1 -> must be immediately excluded from marketing consented list
+      await repository.recordCustomerConsent(
+        customerId: 'cust_test_1',
+        category: 'marketing',
+        status: 'opted_out',
+        source: 'Customer Request',
+        evidence: 'Customer verbal opt-out',
+      );
+
+      expect(repository.marketingConsentedCustomers, isEmpty);
+      expect(repository.utilityConsentedCustomers.length, 1);
+    });
+  });
 }
 
 

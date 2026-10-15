@@ -3,10 +3,12 @@ import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
+import '../../../core/widgets/status_badge.dart';
 import '../../../data/models/customer.dart';
 import '../../../data/models/campaign.dart';
 import '../../../data/models/whatsapp_template.dart';
 import '../../../data/repositories/app_repository.dart';
+import '../../customers/screens/customers_screen.dart';
 import 'sending_simulation_screen.dart';
 
 class CampaignWizardScreen extends StatefulWidget {
@@ -136,6 +138,10 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
     final repo = widget.repository;
     if (_selectedAudienceType == 'All') {
       return repo.eligibleCustomers;
+    } else if (_selectedAudienceType == 'MarketingConsented') {
+      return repo.marketingConsentedCustomers;
+    } else if (_selectedAudienceType == 'UtilityConsented') {
+      return repo.utilityConsentedCustomers;
     } else if (_selectedAudienceType == 'Custom') {
       return repo.eligibleCustomers.where((c) => _customCustomerIds.contains(c.id)).toList();
     } else {
@@ -152,6 +158,10 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
   String _getAudienceDisplayLabel() {
     if (_selectedAudienceType == 'All') {
       return 'All Customers';
+    } else if (_selectedAudienceType == 'MarketingConsented') {
+      return 'Marketing Consented (${widget.repository.marketingConsentedCustomers.length})';
+    } else if (_selectedAudienceType == 'UtilityConsented') {
+      return 'Utility Consented (${widget.repository.utilityConsentedCustomers.length})';
     } else if (_selectedAudienceType == 'Custom') {
       return 'Custom Selection (${_customCustomerIds.length})';
     } else {
@@ -279,28 +289,49 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
     ) ?? false;
   }
 
-  void _showNoConsentedRecipientsDialog() {
+  void _showNoConsentedRecipientsDialog({String categoryLabel = 'Marketing'}) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.shield_outlined, color: AppColors.error, size: 26),
-            SizedBox(width: 10),
-            Expanded(child: Text('No Consented Recipients', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+            const Icon(Icons.shield_outlined, color: AppColors.error, size: 26),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'No Consented $categoryLabel Recipients',
+                style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+              ),
+            ),
           ],
         ),
-        content: const Text(
-          'None of the selected customers have a recorded WhatsApp opt-in consent record.\n\n'
+        content: Text(
+          'None of the selected customers have a verified WhatsApp $categoryLabel opt-in consent record in the authoritative registry.\n\n'
           'In compliance with WhatsApp policies, live production broadcasts require explicit customer consent.\n\n'
-          'Sample and demo customers are strictly excluded from production broadcasts.',
-          style: TextStyle(fontSize: 13.5, height: 1.4),
+          'Sample and demo customers are strictly excluded from production broadcasts. Please record authentic opt-in consent in the Customer directory.',
+          style: const TextStyle(fontSize: 13.5, height: 1.4),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('OK'),
+            child: const Text('Dismiss'),
+          ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.primarySage,
+              foregroundColor: Colors.white,
+            ),
+            icon: const Icon(Icons.people_outline_rounded, size: 16),
+            label: const Text('Manage Customer Consents'),
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (context) => CustomersScreen(repository: widget.repository),
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -373,10 +404,15 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
     // Customer consent filtering for production mode
     List<Customer> targetRecipients = recipients;
     if (settings.isWhatsAppProductionMode) {
-      final consented = recipients.where((c) => !c.isOptedOut && c.hasWhatsAppConsent).toList();
+      final isUtility = _selectedTemplate?.category.toUpperCase() == 'UTILITY';
+      final categoryLabel = isUtility ? 'Utility (Appointment/Transactional)' : 'Marketing';
+      final consented = recipients.where((c) {
+        if (c.isOptedOut) return false;
+        return isUtility ? c.hasUtilityConsent : c.hasMarketingConsent;
+      }).toList();
       final excludedCount = recipients.length - consented.length;
       if (consented.isEmpty) {
-        _showNoConsentedRecipientsDialog();
+        _showNoConsentedRecipientsDialog(categoryLabel: categoryLabel);
         return;
       }
       targetRecipients = consented;
@@ -413,6 +449,7 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
             templateName: _selectedTemplate!.metaTemplateName,
             templateLanguage: _selectedTemplate!.metaLanguage,
             templateVariables: _selectedTemplate!.variables,
+            templateCategory: _selectedTemplate!.category,
           ),
         ),
       );
@@ -731,6 +768,30 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
 
         const SizedBox(height: 10),
 
+        // Option 2: Marketing Consented
+        _buildAudienceCard(
+          title: 'Marketing Consented Clients',
+          subtitle: '${repo.marketingConsentedCustomers.length} clients with verified WhatsApp opt-in',
+          icon: Icons.verified_rounded,
+          isSelected: _selectedAudienceType == 'MarketingConsented',
+          onTap: () => setState(() => _selectedAudienceType = 'MarketingConsented'),
+          isDark: isDark,
+        ),
+
+        const SizedBox(height: 10),
+
+        // Option 3: Utility Consented
+        _buildAudienceCard(
+          title: 'Utility Consented Clients',
+          subtitle: '${repo.utilityConsentedCustomers.length} clients with appointment/update opt-in',
+          icon: Icons.notifications_active_rounded,
+          isSelected: _selectedAudienceType == 'UtilityConsented',
+          onTap: () => setState(() => _selectedAudienceType = 'UtilityConsented'),
+          isDark: isDark,
+        ),
+
+        const SizedBox(height: 10),
+
         // User-Created Groups
         ...groups.map((g) {
           final groupCount = repo.eligibleCustomers.where((c) => g.customerIds.contains(c.id)).length;
@@ -805,7 +866,20 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
                       return CheckboxListTile(
                         dense: true,
                         value: isChecked,
-                        title: Text(c.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                        title: Row(
+                          children: [
+                            Flexible(
+                              child: Text(c.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13), overflow: TextOverflow.ellipsis),
+                            ),
+                            const SizedBox(width: 6),
+                            if (c.hasMarketingConsent)
+                              StatusBadge.marketingConsent()
+                            else if (c.hasUtilityConsent)
+                              StatusBadge.utilityConsent()
+                            else
+                              StatusBadge.noConsent(),
+                          ],
+                        ),
                         subtitle: Text(c.phone, style: const TextStyle(fontSize: 12)),
                         onChanged: (val) {
                           setState(() {
@@ -1559,11 +1633,16 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
                 const SizedBox(height: 8),
                 _buildReviewRow('Production Sender', '+91 95022 59203'),
                 const SizedBox(height: 8),
-                _buildReviewRow(
-                  'Consented Recipients',
-                  '${recipients.where((c) => c.hasWhatsAppConsent && !c.isOptedOut).length} of $totalCount',
-                  isSuccess: recipients.any((c) => c.hasWhatsAppConsent && !c.isOptedOut),
-                ),
+                () {
+                  final isUtility = _selectedTemplate?.category.toUpperCase() == 'UTILITY';
+                  final label = isUtility ? 'Utility' : 'Marketing';
+                  final count = recipients.where((c) => !c.isOptedOut && (isUtility ? c.hasUtilityConsent : c.hasMarketingConsent)).length;
+                  return _buildReviewRow(
+                    '$label Consented Recipients',
+                    '$count of $totalCount',
+                    isSuccess: count > 0,
+                  );
+                }(),
               ] else ...[
                 const SizedBox(height: 8),
                 _buildReviewRow('Mode', 'Demo Mode (Simulated)', isSuccess: false),
@@ -1606,7 +1685,9 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
           const SizedBox(height: 14),
           Builder(
             builder: (context) {
-              final consented = recipients.where((c) => c.hasWhatsAppConsent && !c.isOptedOut).length;
+              final isUtility = _selectedTemplate?.category.toUpperCase() == 'UTILITY';
+              final categoryLabel = isUtility ? 'Utility' : 'Marketing';
+              final consented = recipients.where((c) => !c.isOptedOut && (isUtility ? c.hasUtilityConsent : c.hasMarketingConsent)).length;
               final excluded = totalCount - consented;
               final isHelloWorld = _selectedTemplate?.metaTemplateName.toLowerCase() == 'hello_world';
 
@@ -1637,8 +1718,8 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
                         Expanded(
                           child: Text(
                             consented > 0
-                                ? 'Production Consent Verified: $consented eligible consented recipient(s) will be contacted via +91 95022 59203 ($excluded excluded due to missing opt-in consent or opt-outs).'
-                                : 'No Consented Recipients: None of the selected recipients have recorded WhatsApp opt-in consent. In compliance with Meta WhatsApp policies, production sending requires recorded opt-in consent.',
+                                ? 'Production Consent Verified: $consented eligible $categoryLabel consented recipient(s) will be contacted via +91 95022 59203 ($excluded excluded due to missing opt-in consent or opt-outs).'
+                                : 'No Consented Recipients: None of the selected recipients have recorded WhatsApp $categoryLabel opt-in consent. In compliance with Meta WhatsApp policies, production sending requires recorded opt-in consent. Please record customer consent before broadcasting.',
                             style: TextStyle(
                               fontSize: 12.5,
                               fontWeight: FontWeight.w600,

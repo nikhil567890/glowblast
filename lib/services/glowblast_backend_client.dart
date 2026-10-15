@@ -741,4 +741,176 @@ class GlowBlastBackendClient {
           .timeout(const Duration(seconds: 8));
     } catch (_) {}
   }
+
+  /// Records auditable customer WhatsApp consent with category (marketing or utility)
+  Future<Map<String, dynamic>> recordConsent({
+    required String phone,
+    String? customerId,
+    String consentCategory = 'marketing',
+    required String status,
+    required String source,
+    required String evidence,
+    String? consentTextVersion,
+    bool? allowOptOutOverride,
+    String? token,
+  }) async {
+    final effectiveToken = token ?? authToken;
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
+        'Authorization': 'Bearer ${effectiveToken.trim()}',
+    };
+
+    try {
+      final response = await _httpClient
+          .post(
+            _uri('/api/consent/record'),
+            headers: headers,
+            body: jsonEncode({
+              'phone': phone,
+              'consentCategory': consentCategory,
+              'status': status,
+              'source': source,
+              'evidence': evidence,
+              ...?customerId == null ? null : {'customerId': customerId},
+              ...?consentTextVersion == null ? null : {'consentTextVersion': consentTextVersion},
+              ...?allowOptOutOverride == null ? null : {'allowOptOutOverride': allowOptOutOverride},
+            }),
+          )
+          .timeout(const Duration(seconds: 12));
+
+      Map<String, dynamic> data = {};
+      try {
+        data = jsonDecode(response.body) as Map<String, dynamic>;
+      } catch (_) {}
+
+      return {
+        'success': response.statusCode >= 200 && response.statusCode < 300 && data['success'] == true,
+        'statusCode': response.statusCode,
+        ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {
+          'code': 'NETWORK_ERROR',
+          'message': 'Failed to record consent: $e',
+        },
+      };
+    }
+  }
+
+  /// Retrieves consent status for a specific phone number and category
+  Future<Map<String, dynamic>> getConsent({
+    required String phone,
+    String? category,
+    String? token,
+  }) async {
+    final effectiveToken = token ?? authToken;
+    final headers = <String, String>{
+      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
+        'Authorization': 'Bearer ${effectiveToken.trim()}',
+    };
+
+    try {
+      final query = category != null ? '?category=$category' : '';
+      final response = await _httpClient
+          .get(_uri('/api/consent/$phone$query'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      Map<String, dynamic> data = {};
+      try {
+        data = jsonDecode(response.body) as Map<String, dynamic>;
+      } catch (_) {}
+
+      return {
+        'success': response.statusCode >= 200 && response.statusCode < 300,
+        'statusCode': response.statusCode,
+        ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {
+          'code': 'NETWORK_ERROR',
+          'message': 'Failed to retrieve consent: $e',
+        },
+      };
+    }
+  }
+
+  /// Batch checks consent status for a list of phone numbers
+  Future<Map<String, dynamic>> batchCheckConsent({
+    required List<String> phones,
+    String category = 'marketing',
+    String? token,
+  }) async {
+    final effectiveToken = token ?? authToken;
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
+        'Authorization': 'Bearer ${effectiveToken.trim()}',
+    };
+
+    try {
+      final response = await _httpClient
+          .post(
+            _uri('/api/consent/batch-check'),
+            headers: headers,
+            body: jsonEncode({
+              'phones': phones,
+              'category': category,
+            }),
+          )
+          .timeout(const Duration(seconds: 12));
+
+      Map<String, dynamic> data = {};
+      try {
+        data = jsonDecode(response.body) as Map<String, dynamic>;
+      } catch (_) {}
+
+      return {
+        'success': response.statusCode >= 200 && response.statusCode < 300 && data['success'] == true,
+        'statusCode': response.statusCode,
+        ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {
+          'code': 'NETWORK_ERROR',
+          'message': 'Failed to batch check consent: $e',
+        },
+      };
+    }
+  }
+
+  /// Lists all consent records from authoritative registry
+  Future<List<Map<String, dynamic>>> getConsentList({
+    String? category,
+    String? token,
+  }) async {
+    final effectiveToken = token ?? authToken;
+    final headers = <String, String>{
+      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
+        'Authorization': 'Bearer ${effectiveToken.trim()}',
+    };
+
+    try {
+      final query = category != null ? '?category=$category' : '';
+      final response = await _httpClient
+          .get(_uri('/api/consent$query'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final data = jsonDecode(response.body);
+        if (data is Map && data['records'] is List) {
+          return List<Map<String, dynamic>>.from(data['records']);
+        }
+      }
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
@@ -62,17 +63,249 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
     );
   }
 
-  void _toggleOptOut(Customer customer) async {
-    await widget.repository.toggleOptOut(customer.id, !customer.isOptedOut);
-    setState(() {});
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          !customer.isOptedOut
-              ? '${customer.name} has been opted-out from promotional messaging.'
-              : '${customer.name} is now re-subscribed to promotional messaging.',
-        ),
+  Future<void> _showRecordConsentDialog(
+    Customer customer, {
+    String initialCategory = 'marketing',
+    String initialStatus = 'opted_in',
+  }) async {
+    String selectedCategory = initialCategory;
+    String selectedStatus = initialStatus;
+    final sourceController = TextEditingController(text: 'Front Desk Digital Tablet');
+    final evidenceController = TextEditingController(
+      text: selectedCategory == 'marketing' ? 'Intake Form #${customer.id.split('_').last}' : 'Appointment Booking #${customer.id.split('_').last}',
+    );
+    final textVersionController = TextEditingController(
+      text: selectedCategory == 'marketing' ? 'v2026.1_promotional' : 'v2026.1_appointment_updates',
+    );
+    bool isSubmitting = false;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final isDark = Theme.of(context).brightness == Brightness.dark;
+
+          return AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Row(
+              children: [
+                Icon(
+                  selectedStatus == 'opted_in' ? Icons.verified_user_rounded : Icons.block_rounded,
+                  color: selectedStatus == 'opted_in' ? AppColors.whatsApp : AppColors.error,
+                  size: 22,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    selectedStatus == 'opted_in' ? 'Record WhatsApp Consent' : 'Record Opt-Out / Revocation',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Customer: ${customer.name} (${customer.phone})',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // Consent Category (Marketing vs Utility)
+                    const Text('Consent Category', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ChoiceChip(
+                            label: const Text('Marketing', style: TextStyle(fontSize: 12)),
+                            selected: selectedCategory == 'marketing',
+                            selectedColor: AppColors.primarySageContainer,
+                            onSelected: (val) {
+                              if (val) {
+                                setDialogState(() {
+                                  selectedCategory = 'marketing';
+                                  textVersionController.text = 'v2026.1_promotional';
+                                });
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ChoiceChip(
+                            label: const Text('Utility / Updates', style: TextStyle(fontSize: 12)),
+                            selected: selectedCategory == 'utility',
+                            selectedColor: const Color(0xFFE1F5FE),
+                            onSelected: (val) {
+                              if (val) {
+                                setDialogState(() {
+                                  selectedCategory = 'utility';
+                                  textVersionController.text = 'v2026.1_appointment_updates';
+                                });
+                              }
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Status (Opt-In vs Opt-Out vs Revoked)
+                    const Text('Status Action', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    DropdownButtonFormField<String>(
+                      initialValue: selectedStatus,
+                      decoration: InputDecoration(
+                        isDense: true,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      items: const [
+                        DropdownMenuItem(value: 'opted_in', child: Text('Opted-In (Active Consent)')),
+                        DropdownMenuItem(value: 'opted_out', child: Text('Opted-Out (Customer Requested)')),
+                        DropdownMenuItem(value: 'revoked', child: Text('Revoked (Consent Withdrawn)')),
+                      ],
+                      onChanged: (val) {
+                        if (val != null) setDialogState(() => selectedStatus = val);
+                      },
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Consent Source
+                    const Text('Consent Source', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: sourceController,
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(
+                        hintText: 'e.g. Front Desk Digital Tablet, Physical Signed Waiver',
+                        isDense: true,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Auditable Evidence Reference
+                    const Text('Auditable Evidence / Document ID', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: evidenceController,
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(
+                        hintText: 'e.g. Signed Form Ref #1042, Online Booking #8821',
+                        isDense: true,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Consent Text Version
+                    const Text('Consent Policy / Text Version', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: textVersionController,
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(
+                        hintText: 'e.g. v2026.1_promotional',
+                        isDense: true,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // Compliance notice
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.amber.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.amber.shade700, width: 0.5),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.shield_outlined, size: 16, color: Colors.amber.shade900),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'Production broadcasts require authentic customer consent. Never fabricate evidence or timestamps. All changes are cryptographically audited on the server.',
+                              style: TextStyle(fontSize: 11, color: Colors.amber.shade900, height: 1.3),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: isSubmitting ? null : () => Navigator.of(dialogContext).pop(),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: selectedStatus == 'opted_in' ? AppColors.whatsApp : AppColors.error,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: isSubmitting
+                    ? null
+                    : () async {
+                        final messenger = ScaffoldMessenger.of(context);
+                        final dialogNav = Navigator.of(dialogContext);
+
+                        if (sourceController.text.trim().isEmpty || evidenceController.text.trim().isEmpty) {
+                          messenger.showSnackBar(
+                            const SnackBar(content: Text('Source and Evidence reference are required.')),
+                          );
+                          return;
+                        }
+
+                        setDialogState(() => isSubmitting = true);
+                        final result = await widget.repository.recordCustomerConsent(
+                          customerId: customer.id,
+                          category: selectedCategory,
+                          status: selectedStatus,
+                          source: sourceController.text.trim(),
+                          evidence: evidenceController.text.trim(),
+                          consentTextVersion: textVersionController.text.trim(),
+                          allowOptOutOverride: true,
+                        );
+
+                        dialogNav.pop();
+                        if (!mounted) return;
+                        setState(() {});
+
+                        final isSuccess = result['success'] == true;
+                        messenger.showSnackBar(
+                          SnackBar(
+                            backgroundColor: isSuccess ? AppColors.whatsApp : AppColors.error,
+                            content: Text(
+                              isSuccess
+                                  ? 'Consent recorded: ${selectedCategory.toUpperCase()} → ${selectedStatus.toUpperCase()} for ${customer.name}'
+                                  : 'Failed to record consent: ${result['error']?['message'] ?? 'Unknown error'}',
+                            ),
+                          ),
+                        );
+                      },
+                child: isSubmitting
+                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : Text(selectedStatus == 'opted_in' ? 'Save & Persist Opt-In' : 'Save Opt-Out'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -107,6 +340,8 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
       );
     }
 
+    final dateFormat = DateFormat('dd MMM yyyy, hh:mm a');
+
     return Scaffold(
       appBar: AppBar(
         title: Text(customer.name),
@@ -133,7 +368,7 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            const DemoRibbon(label: 'CUSTOMER DETAILS • NAME & PHONE ONLY'),
+            const DemoRibbon(label: 'CUSTOMER DETAILS • WHATSAPP CONSENT REGISTRY'),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
@@ -148,7 +383,9 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                             radius: 36,
                             backgroundColor: customer.isOptedOut
                                 ? Colors.grey.shade300
-                                : AppColors.primarySageContainer,
+                                : (customer.hasMarketingConsent
+                                    ? AppColors.primarySageContainer
+                                    : const Color(0xFFFFF3E0)),
                             child: Text(
                               customer.name.isNotEmpty
                                   ? customer.name.substring(0, 1).toUpperCase()
@@ -158,7 +395,9 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                                 fontWeight: FontWeight.w800,
                                 color: customer.isOptedOut
                                     ? Colors.grey.shade700
-                                    : AppColors.primarySageDark,
+                                    : (customer.hasMarketingConsent
+                                        ? AppColors.primarySageDark
+                                        : const Color(0xFFE65100)),
                               ),
                             ),
                           ),
@@ -181,11 +420,22 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
                             ),
                           ),
                           const SizedBox(height: 12),
-                          if (customer.isOptedOut)
-                            StatusBadge.optedOut()
-                          else
-                            StatusBadge.regular(),
-                          const SizedBox(height: 20),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 6,
+                            alignment: WrapAlignment.center,
+                            children: [
+                              if (customer.isOptedOut)
+                                StatusBadge.optedOut()
+                              else if (customer.hasMarketingConsent)
+                                StatusBadge.marketingConsent()
+                              else
+                                StatusBadge.noConsent(),
+                              if (customer.hasUtilityConsent)
+                                StatusBadge.utilityConsent(),
+                            ],
+                          ),
+                          const SizedBox(height: 18),
 
                           // WhatsApp Broadcast Action Button
                           ElevatedButton.icon(
@@ -208,37 +458,239 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
 
                     const SizedBox(height: 16),
 
-                    // Compliance / Opt-out Toggle Card
+                    // WhatsApp Customer Consent Management Card
                     AppCard(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      padding: const EdgeInsets.all(18),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'Promotional Broadcasts',
-                                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  customer.isOptedOut
-                                      ? 'Customer is excluded from all WhatsApp campaigns.'
-                                      : 'Eligible to receive promotional WhatsApp campaigns.',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Row(
+                                children: [
+                                  Icon(Icons.verified_user_rounded, color: AppColors.whatsApp, size: 20),
+                                  SizedBox(width: 8),
+                                  Text(
+                                    'WhatsApp Consent Status',
+                                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.sync_rounded, size: 18),
+                                tooltip: 'Sync consents from backend',
+                                onPressed: () async {
+                                  await widget.repository.syncConsentsFromBackend();
+                                  if (mounted) setState(() {});
+                                },
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Authoritative WhatsApp opt-in records required for live Meta broadcasts. Client-only flags are rejected by the backend.',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
                             ),
                           ),
-                          Switch(
-                            value: !customer.isOptedOut,
-                            activeThumbColor: AppColors.primarySage,
-                            onChanged: (_) => _toggleOptOut(customer),
+                          const Divider(height: 24),
+
+                          // 1. Marketing Consent Section
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Text(
+                                          'Marketing Broadcasts',
+                                          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        if (customer.isOptedOut)
+                                          StatusBadge.optedOut()
+                                        else if (customer.hasMarketingConsent)
+                                          StatusBadge.marketingConsent()
+                                        else
+                                          StatusBadge.noConsent(),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      customer.hasMarketingConsent && !customer.isOptedOut
+                                          ? 'Eligible for festive promotions, discounts, and marketing campaigns.'
+                                          : (customer.isOptedOut
+                                              ? 'Customer opted out from all marketing communications.'
+                                              : 'Unconsented: Cannot be included in production marketing broadcasts.'),
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                                      ),
+                                    ),
+                                    if (customer.hasMarketingConsent && customer.marketingConsentRecordedAt != null) ...[
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        'Recorded: ${dateFormat.format(customer.marketingConsentRecordedAt!)}',
+                                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
+                                      ),
+                                      if (customer.marketingConsentSource != null)
+                                        Text(
+                                          'Source: ${customer.marketingConsentSource}',
+                                          style: TextStyle(fontSize: 11, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
+                                        ),
+                                      if (customer.marketingConsentEvidence != null)
+                                        Text(
+                                          'Evidence: ${customer.marketingConsentEvidence}',
+                                          style: TextStyle(fontSize: 11, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
+                                        ),
+                                      if (customer.marketingConsentTextVersion != null)
+                                        Text(
+                                          'Policy: ${customer.marketingConsentTextVersion}',
+                                          style: TextStyle(fontSize: 11, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
+                                        ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              OutlinedButton.icon(
+                                icon: const Icon(Icons.check_circle_outline_rounded, size: 16),
+                                label: Text(customer.hasMarketingConsent ? 'Update Marketing Opt-In' : 'Record Marketing Opt-In'),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: AppColors.whatsApp,
+                                  side: const BorderSide(color: AppColors.whatsApp),
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                onPressed: () => _showRecordConsentDialog(
+                                  customer,
+                                  initialCategory: 'marketing',
+                                  initialStatus: 'opted_in',
+                                ),
+                              ),
+                              if (customer.hasMarketingConsent || !customer.isOptedOut)
+                                OutlinedButton.icon(
+                                  icon: const Icon(Icons.block_rounded, size: 16),
+                                  label: const Text('Record Opt-Out'),
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: AppColors.error,
+                                    side: const BorderSide(color: AppColors.error),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                  onPressed: () => _showRecordConsentDialog(
+                                    customer,
+                                    initialCategory: 'marketing',
+                                    initialStatus: 'opted_out',
+                                  ),
+                                ),
+                            ],
+                          ),
+
+                          const Divider(height: 28),
+
+                          // 2. Utility Consent Section
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Text(
+                                          'Utility & Appointment Reminders',
+                                          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        if (customer.hasUtilityConsent)
+                                          StatusBadge.utilityConsent()
+                                        else
+                                          StatusBadge.noConsent(),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      customer.hasUtilityConsent
+                                          ? 'Eligible for booking confirmations, schedule reminders, and receipts.'
+                                          : 'No active utility consent recorded.',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
+                                      ),
+                                    ),
+                                    if (customer.hasUtilityConsent && customer.utilityConsentRecordedAt != null) ...[
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        'Recorded: ${dateFormat.format(customer.utilityConsentRecordedAt!)}',
+                                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
+                                      ),
+                                      if (customer.utilityConsentSource != null)
+                                        Text(
+                                          'Source: ${customer.utilityConsentSource}',
+                                          style: TextStyle(fontSize: 11, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
+                                        ),
+                                      if (customer.utilityConsentEvidence != null)
+                                        Text(
+                                          'Evidence: ${customer.utilityConsentEvidence}',
+                                          style: TextStyle(fontSize: 11, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
+                                        ),
+                                      if (customer.utilityConsentTextVersion != null)
+                                        Text(
+                                          'Policy: ${customer.utilityConsentTextVersion}',
+                                          style: TextStyle(fontSize: 11, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
+                                        ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              OutlinedButton.icon(
+                                icon: const Icon(Icons.notifications_active_outlined, size: 16),
+                                label: Text(customer.hasUtilityConsent ? 'Update Utility Opt-In' : 'Record Utility Opt-In'),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: const Color(0xFF0277BD),
+                                  side: const BorderSide(color: Color(0xFF0277BD)),
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                onPressed: () => _showRecordConsentDialog(
+                                  customer,
+                                  initialCategory: 'utility',
+                                  initialStatus: 'opted_in',
+                                ),
+                              ),
+                              if (customer.hasUtilityConsent)
+                                OutlinedButton.icon(
+                                  icon: const Icon(Icons.remove_circle_outline_rounded, size: 16),
+                                  label: const Text('Revoke Utility'),
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: Colors.orange.shade800,
+                                    side: BorderSide(color: Colors.orange.shade800),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
+                                  onPressed: () => _showRecordConsentDialog(
+                                    customer,
+                                    initialCategory: 'utility',
+                                    initialStatus: 'revoked',
+                                  ),
+                                ),
+                            ],
                           ),
                         ],
                       ),

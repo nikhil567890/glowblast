@@ -39,6 +39,11 @@ class AppRepository extends ChangeNotifier {
 
   // Getters
   List<Customer> get customers => List.unmodifiable(_customers);
+  List<Customer> get marketingConsentedCustomers =>
+      _customers.where((c) => !c.isOptedOut && c.hasMarketingConsent).toList();
+  List<Customer> get utilityConsentedCustomers =>
+      _customers.where((c) => !c.isOptedOut && c.hasUtilityConsent).toList();
+  List<Customer> get consentedCustomers => marketingConsentedCustomers;
   List<Campaign> get campaigns => List.unmodifiable(_campaigns);
   List<Campaign> get sentCampaigns => _campaigns.where((c) {
     final s = c.status.toLowerCase();
@@ -381,6 +386,131 @@ class AppRepository extends ChangeNotifier {
       notifyListeners();
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_keyCustomers, jsonEncode(_customers.map((c) => c.toJson()).toList()));
+    }
+  }
+
+  /// Records genuine, auditable WhatsApp customer opt-in or opt-out consent with category
+  Future<Map<String, dynamic>> recordCustomerConsent({
+    required String customerId,
+    required String category, // 'marketing' | 'utility'
+    required String status,   // 'opted_in' | 'opted_out' | 'revoked'
+    required String source,
+    required String evidence,
+    String? consentTextVersion,
+    bool allowOptOutOverride = false,
+  }) async {
+    final index = _customers.indexWhere((c) => c.id == customerId);
+    if (index == -1) {
+      return {'success': false, 'error': {'message': 'Customer not found'}};
+    }
+
+    final customer = _customers[index];
+    final cleanPhone = ExcelService.extractClean10Digits(customer.phone);
+    final now = DateTime.now();
+    final isOptedIn = status == 'opted_in';
+
+    // 1. Post to backend if online & authenticated
+    Map<String, dynamic> backendResult = {'success': true};
+    try {
+      backendResult = await backendClient.recordConsent(
+        phone: cleanPhone.length == 10 ? '91$cleanPhone' : cleanPhone,
+        customerId: customer.id,
+        consentCategory: category,
+        status: status,
+        source: source,
+        evidence: evidence,
+        consentTextVersion: consentTextVersion,
+        allowOptOutOverride: allowOptOutOverride,
+      );
+    } catch (e) {
+      debugPrint('[AppRepository] Failed to sync consent to backend: $e');
+    }
+
+    // 2. Update local state
+    Customer updatedCustomer;
+    if (category == 'utility') {
+      updatedCustomer = customer.copyWith(
+        hasUtilityConsent: isOptedIn,
+        utilityConsentRecordedAt: isOptedIn ? now : null,
+        utilityConsentSource: isOptedIn ? source : null,
+        utilityConsentEvidence: isOptedIn ? evidence : null,
+        utilityConsentTextVersion: isOptedIn ? consentTextVersion : null,
+      );
+    } else {
+      updatedCustomer = customer.copyWith(
+        hasMarketingConsent: isOptedIn,
+        marketingConsentRecordedAt: isOptedIn ? now : null,
+        marketingConsentSource: isOptedIn ? source : null,
+        marketingConsentEvidence: isOptedIn ? evidence : null,
+        marketingConsentTextVersion: isOptedIn ? consentTextVersion : null,
+        isOptedOut: status == 'opted_out' ? true : customer.isOptedOut,
+      );
+    }
+
+    _customers[index] = updatedCustomer;
+    notifyListeners();
+
+    // 3. Persist to SharedPreferences
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyCustomers, jsonEncode(_customers.map((c) => c.toJson()).toList()));
+
+    return backendResult;
+  }
+
+  /// Syncs authoritative consent records from backend
+  Future<void> syncConsentsFromBackend() async {
+    try {
+      final records = await backendClient.getConsentList();
+      if (records.isEmpty) return;
+
+      bool changed = false;
+      for (final rec in records) {
+        final phone = rec['phone']?.toString() ?? '';
+        final category = rec['consentCategory']?.toString() ?? 'marketing';
+        final status = rec['status']?.toString() ?? '';
+        final source = rec['source']?.toString();
+        final evidence = rec['evidence']?.toString();
+        final textVer = rec['consentTextVersion']?.toString();
+        final recordedAtStr = rec['recordedAt']?.toString();
+        final recordedAt = recordedAtStr != null ? DateTime.tryParse(recordedAtStr) : null;
+
+        final clean10 = phone.replaceAll(RegExp(r'\D'), '');
+        final last10 = clean10.length >= 10 ? clean10.substring(clean10.length - 10) : clean10;
+
+        for (int i = 0; i < _customers.length; i++) {
+          final cDigits = ExcelService.extractClean10Digits(_customers[i].phone);
+          if (cDigits == last10) {
+            final isOptedIn = status == 'opted_in';
+            if (category == 'utility') {
+              _customers[i] = _customers[i].copyWith(
+                hasUtilityConsent: isOptedIn,
+                utilityConsentRecordedAt: recordedAt,
+                utilityConsentSource: source,
+                utilityConsentEvidence: evidence,
+                utilityConsentTextVersion: textVer,
+              );
+            } else {
+              _customers[i] = _customers[i].copyWith(
+                hasMarketingConsent: isOptedIn,
+                marketingConsentRecordedAt: recordedAt,
+                marketingConsentSource: source,
+                marketingConsentEvidence: evidence,
+                marketingConsentTextVersion: textVer,
+                isOptedOut: status == 'opted_out' ? true : _customers[i].isOptedOut,
+              );
+            }
+            changed = true;
+          }
+        }
+      }
+
+      if (changed) {
+        notifyListeners();
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_keyCustomers, jsonEncode(_customers.map((c) => c.toJson()).toList()));
+      }
+    } catch (e) {
+      debugPrint('[AppRepository] syncConsentsFromBackend error: $e');
     }
   }
 

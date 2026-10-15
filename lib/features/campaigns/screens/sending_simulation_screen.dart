@@ -18,6 +18,7 @@ class SendingSimulationScreen extends StatefulWidget {
   final String templateLanguage;
   final String? templateId;
   final List<String> templateVariables;
+  final String templateCategory;
   final String messagingMode; // 'demo', 'test', 'production'
 
   const SendingSimulationScreen({
@@ -33,6 +34,7 @@ class SendingSimulationScreen extends StatefulWidget {
     this.templateLanguage = 'en_US',
     this.templateId,
     this.templateVariables = const [],
+    this.templateCategory = 'MARKETING',
   });
 
   bool get isProduction => messagingMode == 'production';
@@ -63,9 +65,12 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
   void initState() {
     super.initState();
     // Strictly exclude any opted-out customers, and enforce opt-in consent for production
+    final isUtility = widget.templateCategory.toUpperCase() == 'UTILITY';
     final eligible = widget.selectedCustomers.where((c) {
       if (c.isOptedOut) return false;
-      if (widget.isProduction && !c.hasWhatsAppConsent) return false;
+      if (widget.isProduction) {
+        return isUtility ? c.hasUtilityConsent : c.hasMarketingConsent;
+      }
       return true;
     }).toList();
     _totalToSend = eligible.length; // 1 customer = 1 message
@@ -89,13 +94,15 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
     final campaignId = 'GB-${DateTime.now().millisecondsSinceEpoch}';
 
     // Convert eligible customers to backend payload with consent flags
+    final isUtility = widget.templateCategory.toUpperCase() == 'UTILITY';
     final recipientsPayload = eligible.map((c) {
       return {
         'localCustomerId': c.id,
         'name': c.name,
         'phone': c.phone,
-        'hasConsent': c.hasWhatsAppConsent,
-        'consentRecordedAt': c.consentRecordedAt?.toIso8601String(),
+        'hasConsent': isUtility ? c.hasUtilityConsent : c.hasMarketingConsent,
+        'consentCategory': isUtility ? 'utility' : 'marketing',
+        'consentRecordedAt': (isUtility ? c.utilityConsentRecordedAt : c.marketingConsentRecordedAt)?.toIso8601String(),
       };
     }).toList();
 

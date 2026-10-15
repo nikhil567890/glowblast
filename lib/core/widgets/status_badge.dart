@@ -51,6 +51,33 @@ class StatusBadge extends StatelessWidget {
     );
   }
 
+  factory StatusBadge.marketingConsent() {
+    return const StatusBadge(
+      label: 'Marketing Opt-In',
+      color: Color(0xFFE8F5EE),
+      textColor: Color(0xFF2D6A4F),
+      icon: Icons.verified_rounded,
+    );
+  }
+
+  factory StatusBadge.utilityConsent() {
+    return const StatusBadge(
+      label: 'Utility Opt-In',
+      color: Color(0xFFE1F5FE),
+      textColor: Color(0xFF0277BD),
+      icon: Icons.notifications_active_rounded,
+    );
+  }
+
+  factory StatusBadge.noConsent() {
+    return const StatusBadge(
+      label: 'No Consent',
+      color: Color(0xFFFFF3E0),
+      textColor: Color(0xFFE65100),
+      icon: Icons.gpp_maybe_rounded,
+    );
+  }
+
   factory StatusBadge.birthday() {
     return const StatusBadge(
       label: 'Birthday',

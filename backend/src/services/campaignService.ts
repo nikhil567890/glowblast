@@ -153,11 +153,15 @@ export class CampaignService {
       }
 
       // Production Safety Check 6: Authoritative Server-Side Customer Opt-in Consent Verification
+      const templateCat = (template.category || '').toUpperCase();
+      const requiredConsentCategory: 'marketing' | 'utility' =
+        templateCat === 'UTILITY' ? 'utility' : 'marketing';
+
       for (const r of recipients) {
         const norm = normalizeWhatsAppPhone(r.phone);
         if (!norm) continue;
         if (optedOutPhones.includes(norm) || normalizedOptedOut.has(norm)) continue;
-        const hasConsent = await consentStore.hasActiveConsent(norm);
+        const hasConsent = await consentStore.hasActiveConsent(norm, requiredConsentCategory);
         if (hasConsent) {
           normalizedConsentedPhones.push(norm);
         }
@@ -168,14 +172,14 @@ export class CampaignService {
 
       if (normalizedConsentedPhones.length === 0) {
         console.warn(
-          `[Campaign] Rejected: reason=NO_ELIGIBLE_CONSENTED_RECIPIENTS totalRecipients=${recipients.length}`
+          `[Campaign] Rejected: reason=NO_ELIGIBLE_CONSENTED_RECIPIENTS totalRecipients=${recipients.length} category=${requiredConsentCategory}`
         );
         return {
           success: false,
           error: {
             code: 'NO_ELIGIBLE_CONSENTED_RECIPIENTS',
             message:
-              'No recipients with verified server-side WhatsApp opt-in consent found. Production marketing broadcasts require documented customer consent in the authoritative registry. Client-provided consent flags are not trusted.',
+              `No recipients with verified server-side WhatsApp opt-in consent found for ${requiredConsentCategory}. Production ${requiredConsentCategory} broadcasts require documented customer consent in the authoritative registry. Client-provided consent flags are not trusted.`,
           },
         };
       }
@@ -567,15 +571,17 @@ export class CampaignService {
 
       // Check 3: Authoritative Production Opt-in Consent check
       if (mode === 'production') {
-        const hasServerConsent = await consentStore.hasActiveConsent(claimed.normalizedPhone);
+        const requiredConsentCategory: 'marketing' | 'utility' =
+          (templateRef?.category || '').toUpperCase() === 'UTILITY' ? 'utility' : 'marketing';
+        const hasServerConsent = await consentStore.hasActiveConsent(claimed.normalizedPhone, requiredConsentCategory);
         if (!hasServerConsent) {
           console.warn(
-            `[Campaign] Skipping ${maskPhone(claimed.normalizedPhone)}: Missing verified server-side opt-in consent`
+            `[Campaign] Skipping ${maskPhone(claimed.normalizedPhone)}: Missing verified server-side ${requiredConsentCategory} opt-in consent`
           );
           await messageStore.updateStatus(claimed.id, 'failed', undefined, {
             code: 403,
             title: 'Missing Opt-in Consent',
-            message: 'Recipient lacks verified server-side opt-in consent in the authoritative registry.',
+            message: `Recipient lacks verified server-side ${requiredConsentCategory} opt-in consent in the authoritative registry.`,
           });
           realtimeService.broadcastMessageStatus({
             campaignId,

@@ -1,6 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
+import 'package:archive/archive.dart';
+import 'package:excel/excel.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xml/xml.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:glowblast/services/excel_service.dart';
@@ -85,6 +90,254 @@ void main() {
 
       final result = ExcelService.parseAndValidate(Uint8List.fromList(bytes));
       expect(result.validCount, 4);
+    });
+
+    test('parses real .xlsx with case-insensitive headers and whitespace', () {
+      final excel = Excel.createExcel();
+      final sheet = excel[excel.getDefaultSheet() ?? 'Sheet1'];
+      sheet.appendRow([
+        TextCellValue('  FULL name  '),
+        TextCellValue(' Phone Number '),
+      ]);
+      sheet.appendRow([
+        TextCellValue('Ravi Kumar'),
+        TextCellValue('9876543210'),
+      ]);
+
+      final bytes = Uint8List.fromList(excel.save()!);
+      final result = ExcelService.parseAndValidate(bytes);
+      expect(result.validCount, 1);
+      expect(result.validCustomers.first.name, 'Ravi Kumar');
+      expect(result.validCustomers.first.phone, '+91 98765 43210');
+      expect(result.validCustomers.first.hasWhatsAppConsent, isFalse);
+    });
+
+    test('throws ExcelParseException when required headers are missing', () {
+      final excel = Excel.createExcel();
+      final sheet = excel[excel.getDefaultSheet() ?? 'Sheet1'];
+      sheet.appendRow([
+        TextCellValue('Random Column 1'),
+        TextCellValue('Random Column 2'),
+      ]);
+      sheet.appendRow([
+        TextCellValue('John Doe'),
+        TextCellValue('9876543210'),
+      ]);
+
+      final bytes = Uint8List.fromList(excel.save()!);
+      expect(
+        () => ExcelService.parseAndValidate(bytes),
+        throwsA(isA<ExcelParseException>().having(
+          (e) => e.message,
+          'message',
+          contains('Missing required header(s)'),
+        )),
+      );
+    });
+
+    test('throws ExcelParseException for empty file bytes', () {
+      expect(
+        () => ExcelService.parseAndValidate(Uint8List(0)),
+        throwsA(isA<ExcelParseException>().having(
+          (e) => e.message,
+          'message',
+          contains('empty'),
+        )),
+      );
+    });
+
+    test('throws ExcelParseException for legacy .xls binary format', () {
+      final legacyXlsBytes = Uint8List.fromList([0xD0, 0xCF, 0x11, 0xE0, 0x00, 0x01]);
+      expect(
+        () => ExcelService.parseAndValidate(legacyXlsBytes),
+        throwsA(isA<ExcelParseException>().having(
+          (e) => e.message,
+          'message',
+          contains('Legacy .xls'),
+        )),
+      );
+    });
+
+    test('preserves duplicate detection and invalid phone reporting', () {
+      final excel = Excel.createExcel();
+      final sheet = excel[excel.getDefaultSheet() ?? 'Sheet1'];
+      sheet.appendRow([
+        TextCellValue('Full Name'),
+        TextCellValue('Phone Number'),
+      ]);
+      sheet.appendRow([
+        TextCellValue('Customer One'),
+        TextCellValue('9876543210'),
+      ]);
+      sheet.appendRow([
+        TextCellValue('Duplicate Customer'),
+        TextCellValue('9876543210'), // Duplicate
+      ]);
+      sheet.appendRow([
+        TextCellValue('Invalid Phone Customer'),
+        TextCellValue('12345'), // Invalid phone
+      ]);
+
+      final bytes = Uint8List.fromList(excel.save()!);
+      final result = ExcelService.parseAndValidate(bytes);
+      expect(result.validCount, 1);
+      expect(result.duplicateCount, 1);
+      expect(result.invalidPhoneCount, 1);
+    });
+
+    test('regression test: parses .xlsx with leading /xl/ in relationship targets without TypeError crash', () {
+      final original = Excel.createExcel();
+      final sheet = original[original.getDefaultSheet()!];
+      sheet.appendRow([TextCellValue('Full Name'), TextCellValue('Phone Number')]);
+      sheet.appendRow([TextCellValue('Aarav Sharma'), TextCellValue('+91 98765 43210')]);
+      final bytes = original.save()!;
+      final archive = ZipDecoder().decodeBytes(bytes);
+
+      // Create an archive with /xl/ in relationship target (triggers excel v4.0.6 null-check operator crash)
+      final newArchive = Archive();
+      for (final f in archive.files) {
+        if (f.name == 'xl/_rels/workbook.xml.rels') {
+          final relDoc = XmlDocument.parse(utf8.decode(f.content as List<int>));
+          for (final r in relDoc.findAllElements('Relationship')) {
+            if (r.getAttribute('Target') == 'worksheets/sheet1.xml') {
+              r.setAttribute('Target', '/xl/worksheets/sheet1.xml');
+            }
+          }
+          final newXml = utf8.encode(relDoc.toXmlString());
+          newArchive.addFile(ArchiveFile(f.name, newXml.length, newXml));
+        } else {
+          newArchive.addFile(ArchiveFile(f.name, f.size, f.content));
+        }
+      }
+
+      final badZipBytes = Uint8List.fromList(ZipEncoder().encode(newArchive)!);
+
+      // ExcelService.parseAndValidate should normalize and parse without TypeError
+      final result = ExcelService.parseAndValidate(badZipBytes);
+      expect(result.validCount, 1);
+      expect(result.validCustomers.first.name, 'Aarav Sharma');
+      expect(result.validCustomers.first.phone, '+91 98765 43210');
+    });
+
+    test('regression test: parses Google Sheets inlineStr workbook without sharedStrings.xml', () {
+      final archive = Archive();
+      final relsXml = utf8.encode('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/sheet1.xml"/></Relationships>');
+      final sheetXml = utf8.encode('''<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>Full Name</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>Phone Number</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"><is><t>Priya Sharma</t></is></c>
+      <c r="B2" t="inlineStr"><is><t>9876543210</t></is></c>
+    </row>
+  </sheetData>
+</worksheet>''');
+
+      archive.addFile(ArchiveFile('xl/_rels/workbook.xml.rels', relsXml.length, relsXml));
+      archive.addFile(ArchiveFile('xl/worksheets/sheet1.xml', sheetXml.length, sheetXml));
+
+      final zipBytes = Uint8List.fromList(ZipEncoder().encode(archive)!);
+      final result = ExcelService.parseAndValidate(zipBytes);
+      expect(result.validCount, 1);
+      expect(result.validCustomers.first.name, 'Priya Sharma');
+      expect(result.validCustomers.first.phone, '+91 98765 43210');
+    });
+
+    test('regression test: parses .xlsx with Windows backslashes in archive entry paths', () {
+      final original = Excel.createExcel();
+      final sheet = original[original.getDefaultSheet()!];
+      sheet.appendRow([TextCellValue('Full Name'), TextCellValue('Phone Number')]);
+      sheet.appendRow([TextCellValue('Vikram Malhotra'), TextCellValue('+91 99887 76655')]);
+      final bytes = original.save()!;
+      final archive = ZipDecoder().decodeBytes(bytes);
+
+      final newArchive = Archive();
+      for (final f in archive.files) {
+        final backslashName = f.name.replaceAll('/', '\\');
+        newArchive.addFile(ArchiveFile(backslashName, f.size, f.content));
+      }
+
+      final badZipBytes = Uint8List.fromList(ZipEncoder().encode(newArchive)!);
+      final result = ExcelService.parseAndValidate(badZipBytes);
+      expect(result.validCount, 1);
+      expect(result.validCustomers.first.name, 'Vikram Malhotra');
+      expect(result.validCustomers.first.phone, '+91 99887 76655');
+    });
+
+    test('regression test: parses GlowBlast_Excel_Import_Test.xlsx detecting all 5 customer rows', () {
+      final fixturePath = 'test/fixtures/GlowBlast_Excel_Import_Test.xlsx';
+      final file = File(fixturePath);
+      expect(file.existsSync(), isTrue, reason: 'GlowBlast_Excel_Import_Test.xlsx fixture must exist');
+
+      final bytes = file.readAsBytesSync();
+      final result = ExcelService.parseAndValidate(bytes);
+
+      expect(result.totalRows, 5);
+      expect(result.validCount, 5);
+      expect(result.duplicateCount, 0);
+      expect(result.invalidPhoneCount, 0);
+      expect(result.otherErrorCount, 0);
+
+      expect(result.validCustomers[0].name, 'TEST ONLY - Customer 01');
+      expect(result.validCustomers[0].phone, '+91 98765 00001');
+
+      expect(result.validCustomers[1].name, 'TEST ONLY - Customer 02');
+      expect(result.validCustomers[1].phone, '+91 87654 00002');
+
+      expect(result.validCustomers[2].name, 'TEST ONLY - Customer 03');
+      expect(result.validCustomers[2].phone, '+91 76543 00003');
+
+      expect(result.validCustomers[3].name, 'TEST ONLY - Customer 04');
+      expect(result.validCustomers[3].phone, '+91 65432 00004');
+
+      expect(result.validCustomers[4].name, 'TEST ONLY - Customer 05');
+      expect(result.validCustomers[4].phone, '+91 99887 76655');
+    });
+
+    test('regression test: parses namespaced x: sheet XML and Customers worksheet relationship', () {
+      final archive = Archive();
+      final relsXml = utf8.encode(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/sheet1.xml" Id="rIdCust" />'
+        '</Relationships>',
+      );
+      final wbXml = utf8.encode(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<x:sheets><x:sheet name="Customers" sheetId="1" r:id="rIdCust" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" /></x:sheets>'
+        '</x:workbook>',
+      );
+      final sheetXml = utf8.encode(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<x:sheetData>'
+        '<x:row r="1">'
+        '<x:c r="A1" t="str"><x:v>Full Name</x:v></x:c>'
+        '<x:c r="B1" t="str"><x:v>Phone Number</x:v></x:c>'
+        '</x:row>'
+        '<x:row r="2">'
+        '<x:c r="A2" t="str"><x:v>Neha Gupta</x:v></x:c>'
+        '<x:c r="B2" t="str"><x:v>9811122233</x:v></x:c>'
+        '</x:row>'
+        '</x:sheetData>'
+        '</x:worksheet>',
+      );
+
+      archive.addFile(ArchiveFile('xl/_rels/workbook.xml.rels', relsXml.length, relsXml));
+      archive.addFile(ArchiveFile('xl/workbook.xml', wbXml.length, wbXml));
+      archive.addFile(ArchiveFile('xl/worksheets/sheet1.xml', sheetXml.length, sheetXml));
+
+      final bytes = Uint8List.fromList(ZipEncoder().encode(archive)!);
+      final result = ExcelService.parseAndValidate(bytes);
+
+      expect(result.totalRows, 1);
+      expect(result.validCount, 1);
+      expect(result.validCustomers.first.name, 'Neha Gupta');
+      expect(result.validCustomers.first.phone, '+91 98111 22233');
     });
   });
 
@@ -757,6 +1010,154 @@ void main() {
       expect(repository.utilityConsentedCustomers.length, 1);
     });
 
+    test('bulkRecordMarketingConsent processes 205 customers via bulk API in batches with progress', () async {
+      final customersList = List.generate(205, (i) => {
+        'id': 'cust_$i',
+        'name': 'Client $i',
+        'phone': '+91 98765 ${i.toString().padLeft(5, '0')}',
+        'hasMarketingConsent': false,
+      });
+
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': jsonEncode(customersList),
+      });
+      final repository = AppRepository();
+      await repository.init();
+
+      await repository.saveAuthSession(
+        'valid_jwt_token',
+        AuthUser(id: 'usr_1', name: 'Owner', email: 'owner@spa.com', businessName: 'Spa', emailVerified: true),
+      );
+
+      int bulkRecordApiCallCount = 0;
+      int singleRecordApiCallCount = 0;
+      final progressUpdates = <int>[];
+
+      repository.backendClient = GlowBlastBackendClient(
+        baseUrl: 'https://mock.glowblast.api',
+        authToken: 'valid_jwt_token',
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/api/consent/bulk-record') {
+            bulkRecordApiCallCount++;
+            final body = jsonDecode(req.body);
+            final records = List<Map<String, dynamic>>.from(body['records']);
+            final results = records.map((r) => {
+              'phone': r['phone'],
+              'customerId': r['customerId'],
+              'consentCategory': 'marketing',
+              'status': 'opted_in',
+              'success': true,
+              'recordedAt': DateTime.now().toIso8601String(),
+              'source': r['source'],
+              'evidence': r['evidence'],
+            }).toList();
+
+            return http.Response(
+              jsonEncode({
+                'success': true,
+                'totalRequested': records.length,
+                'succeeded': records.length,
+                'failed': 0,
+                'results': results,
+                'failures': [],
+              }),
+              200,
+            );
+          } else if (req.url.path == '/api/consent/record') {
+            singleRecordApiCallCount++;
+            return http.Response(jsonEncode({'success': true}), 200);
+          }
+          return http.Response('{"success": true}', 200);
+        }),
+      );
+
+      final customerIds = List.generate(205, (i) => 'cust_$i');
+      final result = await repository.bulkRecordMarketingConsent(
+        customerIds: customerIds,
+        source: 'Front Desk Verbal Agreement',
+        evidence: 'Customer In-Person Verbal Opt-In',
+        onProgress: (processed, total) {
+          progressUpdates.add(processed);
+        },
+      );
+
+      // Verify bulk API was used (3 batches of 100, 100, 5)
+      expect(bulkRecordApiCallCount, 3);
+      // Verify individual single-record endpoint was NOT called 205 times!
+      expect(singleRecordApiCallCount, 0);
+
+      // Verify progress reporting
+      expect(progressUpdates, containsAllInOrder([0, 100, 200, 205]));
+
+      // Verify results
+      expect(result['success'], isTrue);
+      expect(result['totalRequested'], 205);
+      expect(result['succeeded'], 205);
+      expect(result['failed'], 0);
+      expect((result['successfulCustomerIds'] as List).length, 205);
+      expect((result['failedCustomerIds'] as List), isEmpty);
+
+      // Verify all 205 customers are updated in local state
+      expect(repository.marketingConsentedCustomers.length, 205);
+    });
+
+    test('bulkRecordMarketingConsent prevents duplicate concurrent submissions', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': '[{"id":"cust_1","name":"Client 1","phone":"+91 98765 43210","hasMarketingConsent":false}]',
+      });
+      final repository = AppRepository();
+      await repository.init();
+
+      await repository.saveAuthSession(
+        'valid_jwt_token',
+        AuthUser(id: 'usr_1', name: 'Owner', email: 'owner@spa.com', businessName: 'Spa', emailVerified: true),
+      );
+
+      final completer = Completer<http.Response>();
+      repository.backendClient = GlowBlastBackendClient(
+        baseUrl: 'https://mock.glowblast.api',
+        authToken: 'valid_jwt_token',
+        httpClient: MockClient((req) async => completer.future),
+      );
+
+      // Start first bulk submission (which hangs waiting for completer)
+      final firstFuture = repository.bulkRecordMarketingConsent(
+        customerIds: ['cust_1'],
+        source: 'Verbal',
+        evidence: 'Check-in',
+      );
+
+      // Attempt second submission immediately while first is in progress
+      final secondResult = await repository.bulkRecordMarketingConsent(
+        customerIds: ['cust_1'],
+        source: 'Verbal',
+        evidence: 'Check-in',
+      );
+
+      expect(secondResult['success'], isFalse);
+      expect(secondResult['error']['code'], 'OPERATION_IN_PROGRESS');
+
+      // Complete the first
+      completer.complete(http.Response(jsonEncode({
+        'success': true,
+        'totalRequested': 1,
+        'succeeded': 1,
+        'failed': 0,
+        'results': [{
+          'phone': '919876543210',
+          'customerId': 'cust_1',
+          'success': true,
+          'status': 'opted_in',
+        }],
+      }), 200));
+
+      final firstResult = await firstFuture;
+      expect(firstResult['success'], isTrue);
+      expect(repository.isBulkRecordingConsent, isFalse);
+    });
+
     test('bulkRecordMarketingConsent updates only selected customers and reports partial failures', () async {
       SharedPreferences.setMockInitialValues({
         'glowblast_is_initialized_v3': true,
@@ -775,22 +1176,37 @@ void main() {
         baseUrl: 'https://mock.glowblast.api',
         authToken: 'valid_jwt_token',
         httpClient: MockClient((req) async {
-          if (req.url.path == '/api/consent/record') {
-            final body = jsonDecode(req.body);
-            if (body['customerId'] == 'cust_2') {
-              return http.Response(jsonEncode({'success': false, 'error': {'message': 'Consent update rejected'}}), 400);
-            }
+          if (req.url.path == '/api/consent/bulk-record') {
             return http.Response(
               jsonEncode({
-                'success': true,
-                'record': {
-                  'phone': body['phone'],
-                  'consentCategory': 'marketing',
-                  'status': 'opted_in',
-                  'recordedAt': DateTime.now().toIso8601String(),
-                  'source': body['source'],
-                  'evidence': body['evidence'],
-                },
+                'success': false,
+                'totalRequested': 2,
+                'succeeded': 1,
+                'failed': 1,
+                'results': [
+                  {
+                    'phone': '919876543210',
+                    'customerId': 'cust_1',
+                    'consentCategory': 'marketing',
+                    'status': 'opted_in',
+                    'success': true,
+                  },
+                  {
+                    'phone': '919876543211',
+                    'customerId': 'cust_2',
+                    'consentCategory': 'marketing',
+                    'status': 'opted_out',
+                    'success': false,
+                    'error': 'Consent update rejected',
+                  },
+                ],
+                'failures': [
+                  {
+                    'phone': '919876543211',
+                    'customerId': 'cust_2',
+                    'error': 'Consent update rejected',
+                  },
+                ],
               }),
               200,
             );
@@ -812,6 +1228,8 @@ void main() {
       expect(bulkResult['failed'], 1);
       expect(bulkResult['failures'].length, 1);
       expect(bulkResult['failures'][0]['customerId'], 'cust_2');
+      expect(bulkResult['failedCustomerIds'], ['cust_2']);
+      expect(bulkResult['successfulCustomerIds'], ['cust_1']);
 
       // cust_1 was updated with verified opt-in
       expect(repository.customers.firstWhere((c) => c.id == 'cust_1').hasMarketingConsent, isTrue);
@@ -839,22 +1257,32 @@ void main() {
         baseUrl: 'https://mock.glowblast.api',
         authToken: 'valid_jwt_token',
         httpClient: MockClient((req) async {
-          if (req.url.path == '/api/consent/record') {
+          if (req.url.path == '/api/consent/bulk-record') {
             final body = jsonDecode(req.body);
             allowOptOutOverrideReceived = body['allowOptOutOverride'] == true;
-            if (body['allowOptOutOverride'] != true) {
-              return http.Response(
-                jsonEncode({
-                  'success': false,
-                  'error': {
-                    'code': 'CONSENT_RECORD_FAILED',
-                    'message': 'Consent update rejected. Reversing an opt-out requires allowOptOutOverride: true and verified administrator authorization.',
+            return http.Response(
+              jsonEncode({
+                'success': false,
+                'totalRequested': 1,
+                'succeeded': 0,
+                'failed': 1,
+                'results': [
+                  {
+                    'phone': '919876543210',
+                    'customerId': 'cust_opted_out',
+                    'success': false,
+                    'error': 'Consent update rejected. Reversing an opt-out requires allowOptOutOverride: true and verified administrator authorization.',
                   },
-                }),
-                400,
-              );
-            }
-            return http.Response(jsonEncode({'success': true}), 200);
+                ],
+                'failures': [
+                  {
+                    'customerId': 'cust_opted_out',
+                    'error': 'Consent update rejected',
+                  },
+                ],
+              }),
+              200,
+            );
           }
           return http.Response('{"success": true}', 200);
         }),
@@ -871,6 +1299,53 @@ void main() {
       expect(bulkResult['failed'], 1);
       expect(repository.customers.firstWhere((c) => c.id == 'cust_opted_out').hasMarketingConsent, isFalse);
       expect(repository.customers.firstWhere((c) => c.id == 'cust_unselected').hasMarketingConsent, isFalse);
+    });
+
+    test('bulkRecordMarketingConsent handles timeout after successful write safely using batchCheckConsent', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': '[{"id":"cust_timeout","name":"Timeout Client","phone":"+91 98765 43210","hasMarketingConsent":false}]',
+      });
+      final repository = AppRepository();
+      await repository.init();
+
+      await repository.saveAuthSession(
+        'valid_jwt_token',
+        AuthUser(id: 'usr_1', name: 'Owner', email: 'owner@spa.com', businessName: 'Spa', emailVerified: true),
+      );
+
+      repository.backendClient = GlowBlastBackendClient(
+        baseUrl: 'https://mock.glowblast.api',
+        authToken: 'valid_jwt_token',
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/api/consent/bulk-record') {
+            // Simulate network timeout on client side
+            throw TimeoutException('Future not completed after 12s');
+          } else if (req.url.path == '/api/consent/batch-check') {
+            // Server confirms consent was already saved in DB before connection dropped
+            return http.Response(
+              jsonEncode({
+                'success': true,
+                'consents': {
+                  '919876543210': true,
+                },
+              }),
+              200,
+            );
+          }
+          return http.Response('{"success": true}', 200);
+        }),
+      );
+
+      final result = await repository.bulkRecordMarketingConsent(
+        customerIds: ['cust_timeout'],
+        source: 'Verbal',
+        evidence: 'Check-in',
+      );
+
+      expect(result['success'], isTrue);
+      expect(result['succeeded'], 1);
+      expect(repository.customers.firstWhere((c) => c.id == 'cust_timeout').hasMarketingConsent, isTrue);
     });
 
     test('Excel import preserves customer list without automatically granting marketing consent', () async {

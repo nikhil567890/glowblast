@@ -2,7 +2,6 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/widgets/demo_ribbon.dart';
@@ -38,15 +37,48 @@ class _ExcelImportScreenState extends State<ExcelImportScreen> {
         allowedExtensions: ['xlsx', 'xls'],
       );
 
-      if (files.isNotEmpty) {
-        final file = files.first;
-        final bytes = await file.readAsBytes();
+      if (files.isEmpty) {
+        // User cancelled file selection
+        return;
+      }
 
-        if (bytes.isNotEmpty) {
-          _processExcelBytes(file.name, bytes);
-        } else {
-          _showError('The selected Excel file is empty or cannot be read.');
+      final file = files.first;
+      final fileNameLower = file.name.toLowerCase();
+      if (fileNameLower.endsWith('.xls') && !fileNameLower.endsWith('.xlsx')) {
+        _showError('Legacy .xls (Excel 97-2003) is not supported. Please save or export your spreadsheet as .xlsx.');
+        return;
+      }
+
+      Uint8List? bytes;
+
+      // Try reading via dart:io File first (works when Android copies to temp cache).
+      final localPath = file.path;
+      if (localPath != null && localPath.isNotEmpty) {
+        try {
+          final ioFile = File(localPath);
+          if (await ioFile.exists()) {
+            bytes = await ioFile.readAsBytes();
+          }
+        } catch (_) {
+          // Ignore; fall through to PlatformFile.readAsBytes()
         }
+      }
+
+      // Fallback: use the PlatformFile's own readAsBytes() which handles
+      // content:// URIs on Android via the Storage Access Framework.
+      if (bytes == null || bytes.isEmpty) {
+        try {
+          bytes = await file.readAsBytes();
+        } catch (e) {
+          _showError('Could not read the Excel file from this location.\n$e');
+          return;
+        }
+      }
+
+      if (bytes.isNotEmpty) {
+        _processExcelBytes(file.name, bytes);
+      } else {
+        _showError('The selected Excel file is empty or cannot be read. Try downloading it to your device first, then import it.');
       }
     } catch (e) {
       _showError('Could not open Excel file: $e');
@@ -55,51 +87,21 @@ class _ExcelImportScreenState extends State<ExcelImportScreen> {
     }
   }
 
-  void _loadSample200Excel() {
-    setState(() => _isLoadingFile = true);
+  Future<void> _shareImportInfo() async {
     try {
-      final sampleBytes = ExcelService.generate200RowTestSampleBytes();
-      _processExcelBytes('sample_customers.xlsx', sampleBytes);
-    } catch (e) {
-      _showError('Error loading sample dataset: $e');
-    } finally {
-      if (mounted) setState(() => _isLoadingFile = false);
-    }
-  }
-
-  Future<void> _downloadSampleTemplate() async {
-    try {
-      final bytes = ExcelService.generateSampleTemplateBytes();
-      final tempDir = await getTemporaryDirectory();
-      final file = File('${tempDir.path}/GlowBlast_Customers_Template.xlsx');
-      await file.writeAsBytes(bytes);
-
       await SharePlus.instance.share(
         ShareParams(
-          files: [XFile(file.path)],
-          text: 'GlowBlast Customer Import Template (.xlsx)',
+          text:
+              'GlowBlast Excel Customer Import\n\n'
+              'Easily bulk-import your customer directory into GlowBlast using an Excel (.xlsx) file.\n\n'
+              'Required columns:\n'
+              '1. Full Name - Customer or client name\n'
+              '2. Phone Number - 10-digit Indian mobile number (e.g., 9876543210 or +91 98765 43210)\n\n'
+              'Duplicate phone numbers and invalid entries are automatically identified.',
         ),
       );
     } catch (e) {
-      _showError('Could not export template: $e');
-    }
-  }
-
-  Future<void> _downloadSample200Dataset() async {
-    try {
-      final bytes = ExcelService.generate200RowTestSampleBytes();
-      final tempDir = await getTemporaryDirectory();
-      final file = File('${tempDir.path}/sample_customers.xlsx');
-      await file.writeAsBytes(bytes);
-
-      await SharePlus.instance.share(
-        ShareParams(
-          files: [XFile(file.path)],
-          text: 'GlowBlast 200-Row Sample Customer Dataset (.xlsx)',
-        ),
-      );
-    } catch (e) {
-      _showError('Could not export sample dataset: $e');
+      _showError('Could not share import guide: $e');
     }
   }
 
@@ -116,8 +118,10 @@ class _ExcelImportScreenState extends State<ExcelImportScreen> {
         _showErrorReview = false;
         _isImportComplete = false;
       });
+    } on ExcelParseException catch (e) {
+      _showError(e.message);
     } catch (e) {
-      _showError('Could not parse Excel spreadsheet. Please ensure it is a valid .xlsx or .xls file.');
+      _showError('Could not parse Excel spreadsheet: $e');
     }
   }
 
@@ -165,9 +169,9 @@ class _ExcelImportScreenState extends State<ExcelImportScreen> {
         title: const Text('Import Customers via Excel'),
         actions: [
           IconButton(
-            tooltip: 'Download Sample Template',
-            icon: const Icon(Icons.file_download_outlined),
-            onPressed: _downloadSampleTemplate,
+            tooltip: 'Share Import Guide',
+            icon: const Icon(Icons.share_outlined),
+            onPressed: _shareImportInfo,
           ),
         ],
       ),
@@ -183,7 +187,7 @@ class _ExcelImportScreenState extends State<ExcelImportScreen> {
                   children: [
                     // Intro
                     Text(
-                      'Bulk Import from Excel (.xlsx / .xls)',
+                      'Bulk Import from Excel (.xlsx)',
                       style: TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.w800,
@@ -245,7 +249,7 @@ class _ExcelImportScreenState extends State<ExcelImportScreen> {
                               ),
                               const SizedBox(height: 6),
                               Text(
-                                'Tap to browse files on your device (.xlsx, .xls)',
+                                'Tap to browse files on your device (.xlsx)',
                                 style: TextStyle(
                                   fontSize: 12.5,
                                   color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
@@ -253,72 +257,6 @@ class _ExcelImportScreenState extends State<ExcelImportScreen> {
                               ),
                             ],
                           ),
-                        ),
-                      ),
-
-                      const SizedBox(height: 16),
-
-                      // Template Download Card
-                      Container(
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: isDark ? AppColors.cardDark : AppColors.warmCream,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: AppColors.borderLight),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                const Icon(Icons.description_outlined, color: AppColors.primarySage, size: 20),
-                                const SizedBox(width: 8),
-                                const Text(
-                                  'Excel Template & Test Datasets',
-                                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Download our pre-formatted blank template or test our ready-to-test 200-customer spreadsheet (190 valid, 7 duplicates, 3 invalid phones).',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: isDark ? AppColors.textMutedDark : AppColors.textMuted,
-                                height: 1.3,
-                              ),
-                            ),
-                            const SizedBox(height: 14),
-                            Wrap(
-                              spacing: 10,
-                              runSpacing: 10,
-                              children: [
-                                OutlinedButton.icon(
-                                  icon: const Icon(Icons.download_rounded, size: 16),
-                                  label: const Text('Download sample Excel'),
-                                  style: OutlinedButton.styleFrom(
-                                    foregroundColor: AppColors.primarySage,
-                                    side: const BorderSide(color: AppColors.primarySage),
-                                  ),
-                                  onPressed: _downloadSampleTemplate,
-                                ),
-                                ElevatedButton.icon(
-                                  icon: const Icon(Icons.play_arrow_rounded, size: 18),
-                                  label: const Text('Test 200-Row Sample'),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: AppColors.primarySage,
-                                    foregroundColor: Colors.white,
-                                  ),
-                                  onPressed: _loadSample200Excel,
-                                ),
-                                TextButton.icon(
-                                  icon: const Icon(Icons.share_outlined, size: 16),
-                                  label: const Text('Share 200 Dataset'),
-                                  onPressed: _downloadSample200Dataset,
-                                ),
-                              ],
-                            ),
-                          ],
                         ),
                       ),
                     ],

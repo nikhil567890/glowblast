@@ -1,7 +1,4 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
@@ -37,26 +34,6 @@ class _CustomersScreenState extends State<CustomersScreen> {
     super.dispose();
   }
 
-  void _exportExcel() async {
-    try {
-      final bytes = ExcelService.exportCustomersToExcelBytes(widget.repository.customers);
-      final tempDir = await getTemporaryDirectory();
-      final file = File('${tempDir.path}/glowblast_customers_export.xlsx');
-      await file.writeAsBytes(bytes);
-
-      await SharePlus.instance.share(
-        ShareParams(
-          files: [XFile(file.path)],
-          text: 'GlowBlast Customer Directory (${widget.repository.customers.length} records)',
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Export error: $e'), backgroundColor: AppColors.error),
-      );
-    }
-  }
 
   List<Customer> _filterCustomers(List<Customer> customers) {
     var list = customers;
@@ -128,6 +105,8 @@ class _CustomersScreenState extends State<CustomersScreen> {
     final sourceController = TextEditingController(text: 'Front Desk Verbal Agreement');
     final evidenceController = TextEditingController(text: 'Customer In-Person Verbal Opt-In');
     bool isSubmitting = false;
+    int progressProcessed = 0;
+    int progressTotal = _selectedCustomerIds.length;
 
     await showDialog(
       context: context,
@@ -182,6 +161,7 @@ class _CustomersScreenState extends State<CustomersScreen> {
                     const SizedBox(height: 4),
                     TextField(
                       controller: sourceController,
+                      enabled: !isSubmitting,
                       decoration: const InputDecoration(
                         isDense: true,
                         hintText: 'e.g. Verbal in-person agreement',
@@ -193,12 +173,32 @@ class _CustomersScreenState extends State<CustomersScreen> {
                     const SizedBox(height: 4),
                     TextField(
                       controller: evidenceController,
+                      enabled: !isSubmitting,
                       decoration: const InputDecoration(
                         isDense: true,
                         hintText: 'e.g. Customer In-Person Verbal Opt-In',
                         border: OutlineInputBorder(),
                       ),
                     ),
+                    if (isSubmitting) ...[
+                      const SizedBox(height: 16),
+                      LinearProgressIndicator(
+                        value: progressTotal > 0 ? (progressProcessed / progressTotal) : null,
+                        backgroundColor: Colors.grey.shade200,
+                        valueColor: const AlwaysStoppedAnimation<Color>(AppColors.whatsApp),
+                      ),
+                      const SizedBox(height: 8),
+                      Center(
+                        child: Text(
+                          'Recording consent: $progressProcessed / $progressTotal',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: AppColors.whatsApp,
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -215,7 +215,11 @@ class _CustomersScreenState extends State<CustomersScreen> {
                   onPressed: isSubmitting
                       ? null
                       : () async {
-                          setDialogState(() => isSubmitting = true);
+                          setDialogState(() {
+                            isSubmitting = true;
+                            progressProcessed = 0;
+                            progressTotal = _selectedCustomerIds.length;
+                          });
                           final messenger = ScaffoldMessenger.of(context);
                           final dialogNav = Navigator.of(dialogContext);
 
@@ -223,6 +227,14 @@ class _CustomersScreenState extends State<CustomersScreen> {
                             customerIds: _selectedCustomerIds.toList(),
                             source: sourceController.text.trim(),
                             evidence: evidenceController.text.trim(),
+                            onProgress: (processed, total) {
+                              if (dialogContext.mounted) {
+                                setDialogState(() {
+                                  progressProcessed = processed;
+                                  progressTotal = total;
+                                });
+                              }
+                            },
                           );
 
                           dialogNav.pop();
@@ -231,19 +243,28 @@ class _CustomersScreenState extends State<CustomersScreen> {
                           final succeeded = result['succeeded'] ?? 0;
                           final failed = result['failed'] ?? 0;
                           final isSuccess = result['success'] == true;
+                          final failedIds = (result['failedCustomerIds'] as List?)?.cast<String>() ?? [];
 
                           setState(() {
-                            _selectedCustomerIds.clear();
-                            _isSelectionMode = false;
+                            if (isSuccess || failedIds.isEmpty) {
+                              _selectedCustomerIds.clear();
+                              _isSelectionMode = false;
+                            } else {
+                              // Retain only remaining failures for retry
+                              _selectedCustomerIds.clear();
+                              _selectedCustomerIds.addAll(failedIds);
+                              _isSelectionMode = true;
+                            }
                           });
 
                           messenger.showSnackBar(
                             SnackBar(
                               backgroundColor: isSuccess ? AppColors.whatsApp : (succeeded > 0 ? AppColors.warning : AppColors.error),
+                              duration: const Duration(seconds: 5),
                               content: Text(
                                 isSuccess
                                     ? 'Marketing consent recorded for $succeeded customers.'
-                                    : 'Recorded $succeeded / ${result['totalRequested']} ($failed failed: ${result['failures']?[0]?['error'] ?? 'Unknown error'})',
+                                    : 'Recorded $succeeded / ${result['totalRequested']} ($failed failed). Remaining $failed failed customers are kept selected for retry.',
                               ),
                             ),
                           );
@@ -326,11 +347,6 @@ class _CustomersScreenState extends State<CustomersScreen> {
                           ),
                         );
                       },
-                    ),
-                    IconButton(
-                      tooltip: 'Export Excel',
-                      icon: const Icon(Icons.file_upload_outlined),
-                      onPressed: _exportExcel,
                     ),
                     IconButton(
                       tooltip: 'Import Excel',

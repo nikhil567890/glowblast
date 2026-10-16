@@ -1,6 +1,17 @@
+import 'dart:convert';
 import 'dart:typed_data';
+import 'package:archive/archive.dart';
 import 'package:excel/excel.dart';
+import 'package:xml/xml.dart';
 import '../data/models/customer.dart';
+
+class ExcelParseException implements Exception {
+  final String message;
+  const ExcelParseException(this.message);
+
+  @override
+  String toString() => message;
+}
 
 class ExcelRowError {
   final int rowNumber;
@@ -70,7 +81,7 @@ class ExcelService {
     if (cellValue == null) return '';
     if (cellValue is TextCellValue) {
       final v = cellValue.value;
-      return v.text ?? v.toString();
+      return (v.text ?? v.toString()).trim();
     } else if (cellValue is IntCellValue) {
       return cellValue.value.toString();
     } else if (cellValue is DoubleCellValue) {
@@ -84,7 +95,361 @@ class ExcelService {
     } else if (cellValue is BoolCellValue) {
       return cellValue.value.toString();
     }
-    return cellValue.toString();
+    return cellValue.toString().trim();
+  }
+
+  static Iterable<XmlElement> _findElementsByLocalName(XmlNode node, String localName) {
+    final target = localName.toLowerCase();
+    return node.descendants
+        .whereType<XmlElement>()
+        .where((e) => e.name.local.toLowerCase() == target);
+  }
+
+  static Iterable<XmlElement> _childElementsByLocalName(XmlElement element, String localName) {
+    final target = localName.toLowerCase();
+    return element.childElements
+        .where((e) => e.name.local.toLowerCase() == target);
+  }
+
+  static String? _getAttributeCaseInsensitive(XmlElement element, String attrName) {
+    final target = attrName.toLowerCase();
+    for (final attr in element.attributes) {
+      if (attr.name.local.toLowerCase() == target) {
+        return attr.value;
+      }
+    }
+    return null;
+  }
+
+  /// Normalizes OpenXML ZIP archive structure before passing to the excel package.
+  /// Fixes leading `/xl/` or `xl/` in relationship targets, Windows backslashes in archive paths,
+  /// invalid `numFmtId < 164` in styles, and ensures sharedStrings presence.
+  static Uint8List normalizeXlsx(Uint8List bytes) {
+    final archive = ZipDecoder().decodeBytes(bytes);
+    final newArchive = Archive();
+
+    bool hasSharedStrings = false;
+    ArchiveFile? relsFile;
+    ArchiveFile? stylesFile;
+
+    for (final file in archive.files) {
+      String cleanName = file.name.replaceAll('\\', '/');
+      while (cleanName.startsWith('/')) {
+        cleanName = cleanName.substring(1);
+      }
+
+      if (cleanName.toLowerCase() == 'xl/sharedstrings.xml') {
+        hasSharedStrings = true;
+      }
+      if (cleanName.toLowerCase() == 'xl/_rels/workbook.xml.rels') {
+        relsFile = file;
+        continue;
+      }
+      if (cleanName.toLowerCase() == 'xl/styles.xml') {
+        stylesFile = file;
+        continue;
+      }
+
+      newArchive.addFile(ArchiveFile(cleanName, file.size, file.content));
+    }
+
+    // 1. Process workbook.xml.rels
+    if (relsFile != null) {
+      try {
+        final relDoc = XmlDocument.parse(utf8.decode(relsFile.content as List<int>));
+        for (final rel in _findElementsByLocalName(relDoc, 'relationship')) {
+          var target = _getAttributeCaseInsensitive(rel, 'target') ?? '';
+          target = target.replaceAll('\\', '/');
+          while (target.startsWith('/')) {
+            target = target.substring(1);
+          }
+          if (target.toLowerCase().startsWith('xl/')) {
+            target = target.substring(3);
+          }
+          rel.setAttribute('Target', target);
+        }
+        final newXml = utf8.encode(relDoc.toXmlString());
+        newArchive.addFile(ArchiveFile('xl/_rels/workbook.xml.rels', newXml.length, newXml));
+      } catch (_) {
+        newArchive.addFile(ArchiveFile('xl/_rels/workbook.xml.rels', relsFile.size, relsFile.content));
+      }
+    }
+
+    // 2. Process styles.xml: remove invalid custom numFmt elements where numFmtId < 164
+    if (stylesFile != null) {
+      try {
+        final styleDoc = XmlDocument.parse(utf8.decode(stylesFile.content as List<int>));
+        for (final numFmts in _findElementsByLocalName(styleDoc, 'numfmts')) {
+          final toRemove = <XmlElement>[];
+          for (final numFmt in _childElementsByLocalName(numFmts, 'numfmt')) {
+            final idStr = _getAttributeCaseInsensitive(numFmt, 'numfmtid');
+            final id = idStr != null ? int.tryParse(idStr) : null;
+            if (id != null && id < 164) {
+              toRemove.add(numFmt);
+            }
+          }
+          for (final elem in toRemove) {
+            elem.parent?.children.remove(elem);
+          }
+        }
+        final newXml = utf8.encode(styleDoc.toXmlString());
+        newArchive.addFile(ArchiveFile('xl/styles.xml', newXml.length, newXml));
+      } catch (_) {
+        newArchive.addFile(ArchiveFile('xl/styles.xml', stylesFile.size, stylesFile.content));
+      }
+    }
+
+    // 3. Ensure sharedStrings.xml exists
+    if (!hasSharedStrings) {
+      final defaultSst = utf8.encode(
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="0" uniqueCount="0"/>',
+      );
+      newArchive.addFile(ArchiveFile('xl/sharedStrings.xml', defaultSst.length, defaultSst));
+    }
+
+    return Uint8List.fromList(ZipEncoder().encode(newArchive)!);
+  }
+
+  /// Directly parses worksheet rows from OpenXML ZIP archive as a fail-safe fallback.
+  /// Handles files from Google Sheets, Microsoft Excel, LibreOffice, WPS Office, etc.
+  static List<List<String>> parseWorksheetRowsDirectly(Uint8List zipBytes) {
+    final archive = ZipDecoder().decodeBytes(zipBytes);
+    final files = <String, ArchiveFile>{};
+    for (final f in archive.files) {
+      String name = f.name.replaceAll('\\', '/');
+      while (name.startsWith('/')) {
+        name = name.substring(1);
+      }
+      files[name.toLowerCase()] = f;
+    }
+
+    final sharedStrings = <String>[];
+    final ssFile = files['xl/sharedstrings.xml'];
+    if (ssFile != null) {
+      try {
+        final doc = XmlDocument.parse(utf8.decode(ssFile.content as List<int>));
+        for (final si in _findElementsByLocalName(doc, 'si')) {
+          final buffer = StringBuffer();
+          for (final t in _findElementsByLocalName(si, 't')) {
+            buffer.write(t.innerText);
+          }
+          sharedStrings.add(buffer.toString());
+        }
+      } catch (_) {}
+    }
+
+    // Map relationship IDs to targets from workbook.xml.rels
+    final relIdToTarget = <String, String>{};
+    final relsFile = files['xl/_rels/workbook.xml.rels'];
+    if (relsFile != null) {
+      try {
+        final relDoc = XmlDocument.parse(utf8.decode(relsFile.content as List<int>));
+        for (final rel in _findElementsByLocalName(relDoc, 'relationship')) {
+          final id = _getAttributeCaseInsensitive(rel, 'id');
+          var target = _getAttributeCaseInsensitive(rel, 'target') ?? '';
+          if (id != null && target.isNotEmpty) {
+            target = target.replaceAll('\\', '/');
+            while (target.startsWith('/')) {
+              target = target.substring(1);
+            }
+            if (!target.toLowerCase().startsWith('xl/')) {
+              target = 'xl/$target';
+            }
+            relIdToTarget[id] = target;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Select worksheet from workbook.xml, preferring Customer-related sheets
+    String? sheetPath;
+    final wbFile = files['xl/workbook.xml'];
+    if (wbFile != null) {
+      try {
+        final wbDoc = XmlDocument.parse(utf8.decode(wbFile.content as List<int>));
+        final sheets = _findElementsByLocalName(wbDoc, 'sheet').toList();
+        for (final s in sheets) {
+          final name = _getAttributeCaseInsensitive(s, 'name') ?? '';
+          final rId = _getAttributeCaseInsensitive(s, 'id') ?? '';
+          final lower = name.toLowerCase();
+          if (lower == 'customers' || lower == 'customer' || lower == 'clients' || lower == 'contacts') {
+            if (relIdToTarget.containsKey(rId)) {
+              sheetPath = relIdToTarget[rId];
+              break;
+            }
+          }
+        }
+        if (sheetPath == null && sheets.isNotEmpty) {
+          for (final s in sheets) {
+            final rId = _getAttributeCaseInsensitive(s, 'id') ?? '';
+            if (relIdToTarget.containsKey(rId)) {
+              sheetPath = relIdToTarget[rId];
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Fallback: first worksheet relationship from workbook.xml.rels
+    if (sheetPath == null && relsFile != null) {
+      try {
+        final relDoc = XmlDocument.parse(utf8.decode(relsFile.content as List<int>));
+        for (final rel in _findElementsByLocalName(relDoc, 'relationship')) {
+          final type = _getAttributeCaseInsensitive(rel, 'type') ?? '';
+          if (type.toLowerCase().endsWith('worksheet')) {
+            var target = _getAttributeCaseInsensitive(rel, 'target') ?? '';
+            target = target.replaceAll('\\', '/');
+            while (target.startsWith('/')) {
+              target = target.substring(1);
+            }
+            if (!target.toLowerCase().startsWith('xl/')) {
+              target = 'xl/$target';
+            }
+            sheetPath = target;
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+
+    sheetPath ??= 'xl/worksheets/sheet1.xml';
+    var sheetFile = files[sheetPath.toLowerCase()];
+    if (sheetFile == null) {
+      for (final entry in files.entries) {
+        if (entry.key.startsWith('xl/worksheets/') && entry.key.endsWith('.xml') && !entry.key.contains('_rels')) {
+          sheetFile = entry.value;
+          break;
+        }
+      }
+    }
+
+    if (sheetFile == null) {
+      throw const ExcelParseException('The Excel file contains no worksheets.');
+    }
+
+    final sheetDoc = XmlDocument.parse(utf8.decode(sheetFile.content as List<int>));
+    final sheetData = _findElementsByLocalName(sheetDoc, 'sheetdata').firstOrNull;
+    if (sheetData == null) {
+      return [];
+    }
+
+    final rows = <List<String>>[];
+    for (final rowElem in _childElementsByLocalName(sheetData, 'row')) {
+      final cellMap = <int, String>{};
+      int maxCol = -1;
+      int colCounter = 0;
+
+      for (final c in _childElementsByLocalName(rowElem, 'c')) {
+        final rAttr = _getAttributeCaseInsensitive(c, 'r');
+        int colIdx = colCounter;
+        if (rAttr != null) {
+          final colLetters = rAttr.replaceAll(RegExp(r'[^A-Za-z]'), '').toUpperCase();
+          if (colLetters.isNotEmpty) {
+            int colNum = 0;
+            for (int i = 0; i < colLetters.length; i++) {
+              colNum = colNum * 26 + (colLetters.codeUnitAt(i) - 64);
+            }
+            colIdx = colNum - 1;
+          }
+        }
+
+        final t = _getAttributeCaseInsensitive(c, 't');
+        String cellValue = '';
+
+        if (t == 's') {
+          final vElem = _childElementsByLocalName(c, 'v').firstOrNull;
+          if (vElem != null) {
+            final idx = int.tryParse(vElem.innerText.trim());
+            if (idx != null && idx >= 0 && idx < sharedStrings.length) {
+              cellValue = sharedStrings[idx];
+            }
+          }
+        } else if (t == 'inlineStr') {
+          final buffer = StringBuffer();
+          for (final tElem in _findElementsByLocalName(c, 't')) {
+            buffer.write(tElem.innerText);
+          }
+          cellValue = buffer.toString();
+        } else {
+          final vElem = _childElementsByLocalName(c, 'v').firstOrNull;
+          if (vElem != null) {
+            cellValue = vElem.innerText.trim();
+          } else {
+            final isElem = _childElementsByLocalName(c, 'is').firstOrNull;
+            if (isElem != null) {
+              final buffer = StringBuffer();
+              for (final tElem in _findElementsByLocalName(isElem, 't')) {
+                buffer.write(tElem.innerText);
+              }
+              cellValue = buffer.toString();
+            }
+          }
+        }
+
+        cellMap[colIdx] = cellValue;
+        if (colIdx > maxCol) maxCol = colIdx;
+        colCounter = colIdx + 1;
+      }
+
+      final rowList = List<String>.filled(maxCol + 1, '');
+      for (final entry in cellMap.entries) {
+        rowList[entry.key] = entry.value;
+      }
+      rows.add(rowList);
+    }
+
+    return rows;
+  }
+
+  /// Extracts rows from Excel file bytes using normalized decoding with direct OpenXML fallback.
+  static List<List<String>> _extractRowsFromBytes(Uint8List fileBytes) {
+    // 1. Try decoding with Excel package after normalising XML and relationships
+    try {
+      final normalizedBytes = normalizeXlsx(fileBytes);
+      final excel = Excel.decodeBytes(normalizedBytes);
+      if (excel.sheets.isNotEmpty) {
+        String? targetSheetName;
+        for (final key in excel.sheets.keys) {
+          final lower = key.toLowerCase();
+          if (lower == 'customers' || lower == 'customer' || lower == 'clients' || lower == 'contacts') {
+            targetSheetName = key;
+            break;
+          }
+        }
+        targetSheetName ??= excel.getDefaultSheet() ?? excel.sheets.keys.first;
+        var sheet = excel[targetSheetName];
+        if (sheet.rows.isEmpty) {
+          for (final entry in excel.sheets.entries) {
+            if (entry.value.rows.isNotEmpty) {
+              sheet = entry.value;
+              break;
+            }
+          }
+        }
+        if (sheet.rows.isNotEmpty) {
+          final rows = <List<String>>[];
+          for (final row in sheet.rows) {
+            rows.add(row.map((cell) => extractCellValue(cell?.value).trim()).toList());
+          }
+          if (rows.isNotEmpty) {
+            return rows;
+          }
+        }
+      }
+    } catch (_) {
+      // If Excel.decodeBytes fails (e.g. TypeError, StateError, etc.), fall through to direct OpenXML parser
+    }
+
+    // 2. Fallback: Parse worksheet rows directly from OpenXML ZIP archive
+    try {
+      return parseWorksheetRowsDirectly(fileBytes);
+    } catch (e) {
+      if (e is ExcelParseException) rethrow;
+      throw ExcelParseException(
+        'Could not decode Excel workbook: $e. Ensure the file is a valid .xlsx file and not corrupted.',
+      );
+    }
   }
 
   /// Parses Excel file bytes, reads the first sheet, detects columns, validates phone numbers and duplicates
@@ -92,8 +457,32 @@ class ExcelService {
     Uint8List fileBytes, {
     List<Customer>? existingCustomers,
   }) {
-    final excel = Excel.decodeBytes(fileBytes);
-    if (excel.tables.isEmpty) {
+    if (fileBytes.isEmpty) {
+      throw const ExcelParseException('The Excel file is empty.');
+    }
+
+    // Check for legacy .xls binary format signature (OLE2 Compound Document: 0xD0, 0xCF, 0x11, 0xE0)
+    // — must be checked BEFORE the minimum-size guard so it gives the correct message.
+    if (fileBytes.length >= 4 &&
+        fileBytes[0] == 0xD0 &&
+        fileBytes[1] == 0xCF &&
+        fileBytes[2] == 0x11 &&
+        fileBytes[3] == 0xE0) {
+      throw const ExcelParseException(
+        'Legacy .xls format is not supported. Please save or export your spreadsheet as .xlsx (Excel workbook).',
+      );
+    }
+
+    // A valid .xlsx ZIP file must be at least 22 bytes (minimum valid ZIP end-of-central-directory).
+    if (fileBytes.length < 22) {
+      throw const ExcelParseException(
+        'The Excel file is too small to be valid. It may have been corrupted or incompletely transferred.',
+      );
+    }
+
+    final rows = _extractRowsFromBytes(fileBytes);
+
+    if (rows.isEmpty) {
       return ExcelValidationResult(
         totalRows: 0,
         validCustomers: [],
@@ -103,40 +492,46 @@ class ExcelService {
       );
     }
 
-    final firstSheetName = excel.tables.keys.first;
-    final sheet = excel.tables[firstSheetName];
-    if (sheet == null || sheet.rows.isEmpty) {
-      return ExcelValidationResult(
-        totalRows: 0,
-        validCustomers: [],
-        duplicateRows: [],
-        invalidPhoneRows: [],
-        invalidDataRows: [],
-      );
-    }
-
-    // Identify header row
-    final headerRow = sheet.rows.first.map((cell) => extractCellValue(cell?.value).trim()).toList();
+    // Identify header row (check the first 5 rows to allow optional title/banner rows)
+    int headerRowIndex = 0;
     int nameIdx = -1;
     int phoneIdx = -1;
 
-    for (int i = 0; i < headerRow.length; i++) {
-      final h = headerRow[i].toLowerCase().replaceAll(RegExp(r'[\s_\-]'), '');
-      if (h == 'name' || h == 'fullname' || h == 'customername' || h == 'clientname') {
-        nameIdx = i;
-      } else if (h == 'phone' ||
-          h == 'mobile' ||
-          h == 'mobilenumber' ||
-          h == 'phonenumber' ||
-          h == 'contact' ||
-          h == 'contactnumber') {
-        phoneIdx = i;
+    for (int r = 0; r < rows.length && r < 5; r++) {
+      final candidateRow = rows[r].map((cell) => cell.trim()).toList();
+      int tempName = -1;
+      int tempPhone = -1;
+
+      for (int i = 0; i < candidateRow.length; i++) {
+        final h = candidateRow[i].toLowerCase().replaceAll(RegExp(r'[\s_\-]'), '');
+        if (h == 'name' || h == 'fullname' || h == 'customername' || h == 'clientname') {
+          tempName = i;
+        } else if (h == 'phone' ||
+            h == 'mobile' ||
+            h == 'mobilenumber' ||
+            h == 'phonenumber' ||
+            h == 'contact' ||
+            h == 'contactnumber') {
+          tempPhone = i;
+        }
+      }
+
+      if (tempName != -1 && tempPhone != -1) {
+        headerRowIndex = r;
+        nameIdx = tempName;
+        phoneIdx = tempPhone;
+        break;
       }
     }
 
-    // Column index fallbacks if standard header names were omitted
-    if (nameIdx == -1 && headerRow.isNotEmpty) nameIdx = 0;
-    if (phoneIdx == -1 && headerRow.length > 1) phoneIdx = 1;
+    if (nameIdx == -1 || phoneIdx == -1) {
+      final missing = <String>[];
+      if (nameIdx == -1) missing.add('"Full Name"');
+      if (phoneIdx == -1) missing.add('"Phone Number"');
+      throw ExcelParseException(
+        'Missing required header(s): ${missing.join(' and ')}. Please ensure your sheet includes "Full Name" and "Phone Number" columns.',
+      );
+    }
 
     final existingPhoneSet = <String>{};
     if (existingCustomers != null) {
@@ -154,15 +549,15 @@ class ExcelService {
 
     int processedDataRows = 0;
 
-    for (int rowIndex = 1; rowIndex < sheet.rows.length; rowIndex++) {
-      final row = sheet.rows[rowIndex];
+    for (int rowIndex = headerRowIndex + 1; rowIndex < rows.length; rowIndex++) {
+      final row = rows[rowIndex];
       if (row.isEmpty) continue;
 
       final rawName = (nameIdx >= 0 && nameIdx < row.length)
-          ? extractCellValue(row[nameIdx]?.value).trim()
+          ? row[nameIdx].trim()
           : '';
       final rawPhone = (phoneIdx >= 0 && phoneIdx < row.length)
-          ? extractCellValue(row[phoneIdx]?.value).trim()
+          ? row[phoneIdx].trim()
           : '';
 
       // Skip completely empty rows

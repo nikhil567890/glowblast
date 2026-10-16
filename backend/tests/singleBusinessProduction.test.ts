@@ -880,7 +880,13 @@ describe('Single-Business Production WhatsApp Cloud API Controls', () => {
 
   test('24. Migration 007 is idempotent, rerunnable, and preserves audit log history', async () => {
     const pool = getPool();
-    const migrationPath = path.join(__dirname, '../src/db/migrations/007_add_consent_category_and_metadata.sql');
+    const candidatePaths = [
+      path.join(__dirname, '../src/db/migrations/007_add_consent_category_and_metadata.sql'),
+      path.join(__dirname, '../../src/db/migrations/007_add_consent_category_and_metadata.sql'),
+      path.join(process.cwd(), 'src/db/migrations/007_add_consent_category_and_metadata.sql'),
+      path.join(process.cwd(), 'backend/src/db/migrations/007_add_consent_category_and_metadata.sql'),
+    ];
+    const migrationPath = candidatePaths.find((p) => fs.existsSync(p)) || candidatePaths[0];
     const sql = fs.readFileSync(migrationPath, 'utf8');
 
     // Run migration 007 SQL directly on existing populated database
@@ -1072,7 +1078,13 @@ describe('Single-Business Production WhatsApp Cloud API Controls', () => {
     assert.deepEqual(pkCols, ['normalized_phone', 'consent_category']);
 
     // Re-run migration 007 to verify it detects the exact composite PK and takes the safe no-op branch
-    const migrationPath = path.join(__dirname, '../src/db/migrations/007_add_consent_category_and_metadata.sql');
+    const candidatePaths = [
+      path.join(__dirname, '../src/db/migrations/007_add_consent_category_and_metadata.sql'),
+      path.join(__dirname, '../../src/db/migrations/007_add_consent_category_and_metadata.sql'),
+      path.join(process.cwd(), 'src/db/migrations/007_add_consent_category_and_metadata.sql'),
+      path.join(process.cwd(), 'backend/src/db/migrations/007_add_consent_category_and_metadata.sql'),
+    ];
+    const migrationPath = candidatePaths.find((p) => fs.existsSync(p)) || candidatePaths[0];
     const sql = fs.readFileSync(migrationPath, 'utf8');
     await pool.query(sql);
 

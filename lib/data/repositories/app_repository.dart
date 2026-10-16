@@ -29,10 +29,12 @@ class AppRepository extends ChangeNotifier {
   String? _authToken;
   AuthUser? _currentUser;
   bool _isLoading = true;
+  bool _isBulkRecordingConsent = false;
   late GlowBlastBackendClient backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
 
   // Auth getters
   bool get isAuthenticated => _authToken != null && _currentUser != null;
+  bool get isBulkRecordingConsent => _isBulkRecordingConsent;
   bool get hasProfile => _settings.hasProfile;
   AuthUser? get currentUser => _currentUser;
   String? get authToken => _authToken;
@@ -518,12 +520,14 @@ class AppRepository extends ChangeNotifier {
 
   /// Bulk records verbal marketing consent for a selected list of customer IDs.
   /// Only updates customers that are explicitly selected.
+  /// Sends batched requests using backendClient.bulkRecordConsent.
   /// Reports per-record outcomes accurately — does NOT claim all succeeded when some fail.
   Future<Map<String, dynamic>> bulkRecordMarketingConsent({
     required List<String> customerIds,
     required String source,
     required String evidence,
     String consentTextVersion = 'v2026.1_verbal_confirmed',
+    void Function(int processed, int total)? onProgress,
   }) async {
     if (_authToken == null || _authToken!.trim().isEmpty) {
       return {
@@ -535,40 +539,190 @@ class AppRepository extends ChangeNotifier {
       };
     }
 
-    int succeeded = 0;
-    int failed = 0;
-    final List<Map<String, dynamic>> failures = [];
-
-    for (final id in customerIds) {
-      final result = await recordCustomerConsent(
-        customerId: id,
-        category: 'marketing',
-        status: 'opted_in',
-        source: source,
-        evidence: evidence,
-        consentTextVersion: consentTextVersion,
-        allowOptOutOverride: false,
-      );
-      if (result['success'] == true) {
-        succeeded++;
-      } else {
-        failed++;
-        final cust = _customers.firstWhere((c) => c.id == id, orElse: () => Customer(id: id, name: id, phone: ''));
-        failures.add({
-          'customerId': id,
-          'name': cust.name,
-          'error': result['error']?['message'] ?? 'Unknown error',
-        });
-      }
+    if (customerIds.isEmpty) {
+      return {
+        'success': true,
+        'totalRequested': 0,
+        'succeeded': 0,
+        'failed': 0,
+        'failures': <Map<String, dynamic>>[],
+        'successfulCustomerIds': <String>[],
+        'failedCustomerIds': <String>[],
+      };
     }
 
-    return {
-      'success': failed == 0,
-      'totalRequested': customerIds.length,
-      'succeeded': succeeded,
-      'failed': failed,
-      'failures': failures,
-    };
+    if (_isBulkRecordingConsent) {
+      return {
+        'success': false,
+        'error': {
+          'code': 'OPERATION_IN_PROGRESS',
+          'message': 'Bulk consent recording is already in progress. Please wait for it to complete.',
+        },
+      };
+    }
+
+    _isBulkRecordingConsent = true;
+
+    try {
+      int succeeded = 0;
+      int failed = 0;
+      final List<Map<String, dynamic>> failures = [];
+      final List<String> successfulCustomerIds = [];
+      final List<String> failedCustomerIds = [];
+
+      // Chunk into manageable batches of 100 for bounded payload size and responsive UI progress
+      const batchSize = 100;
+      final totalToProcess = customerIds.length;
+      int processedCount = 0;
+
+      onProgress?.call(0, totalToProcess);
+
+      for (int i = 0; i < customerIds.length; i += batchSize) {
+        final chunkIds = customerIds.sublist(
+          i,
+          (i + batchSize > customerIds.length) ? customerIds.length : i + batchSize,
+        );
+
+        final batchPayload = <Map<String, dynamic>>[];
+        final Map<String, Customer> batchCustomerMap = {};
+
+        for (final id in chunkIds) {
+          final cust = _customers.firstWhere(
+            (c) => c.id == id,
+            orElse: () => Customer(id: id, name: id, phone: ''),
+          );
+          batchCustomerMap[id] = cust;
+          final cleanDigits = ExcelService.extractClean10Digits(cust.phone);
+          final phone = cleanDigits.length == 10 ? '91$cleanDigits' : cleanDigits;
+
+          batchPayload.add({
+            'phone': phone,
+            'customerId': id,
+            'source': source,
+            'evidence': evidence,
+            'consentTextVersion': consentTextVersion,
+          });
+        }
+
+        // Call bulk endpoint with bounded timeout
+        Map<String, dynamic> response;
+        try {
+          response = await backendClient.bulkRecordConsent(
+            records: batchPayload,
+            allowOptOutOverride: false,
+          );
+        } catch (e) {
+          response = {
+            'success': false,
+            'error': {'code': 'NETWORK_ERROR', 'message': e.toString()},
+          };
+        }
+
+        // If network error/timeout: check if records were saved before marking as failed or retrying
+        if (response['success'] != true && response['results'] == null) {
+          // Attempt a safe batchCheckConsent to verify whether database write succeeded before the network dropped
+          try {
+            final phonesToCheck = batchPayload.map((r) => r['phone'] as String).toList();
+            final checkRes = await backendClient.batchCheckConsent(phones: phonesToCheck);
+            if (checkRes['success'] == true && checkRes['consents'] is Map) {
+              final consentsMap = checkRes['consents'] as Map;
+              final syntheticResults = <Map<String, dynamic>>[];
+              for (final r in batchPayload) {
+                final phone = r['phone'] as String;
+                final isOptedIn = consentsMap[phone] == true;
+                syntheticResults.add({
+                  'phone': phone,
+                  'customerId': r['customerId'],
+                  'success': isOptedIn,
+                  'status': isOptedIn ? 'opted_in' : 'unknown',
+                  'error': isOptedIn ? null : (response['error']?['message'] ?? 'Network timeout'),
+                });
+              }
+              response = {
+                'success': syntheticResults.every((r) => r['success'] == true),
+                'results': syntheticResults,
+              };
+            }
+          } catch (_) {
+            // Keep original network failure response
+          }
+        }
+
+        final now = DateTime.now();
+
+        // Process individual results if returned
+        if (response['results'] is List) {
+          final resultsList = List<Map<String, dynamic>>.from(response['results']);
+          for (final res in resultsList) {
+            final cId = res['customerId']?.toString();
+            final isSuccess = res['success'] == true;
+            final cust = cId != null ? batchCustomerMap[cId] : null;
+
+            if (isSuccess && cId != null) {
+              succeeded++;
+              successfulCustomerIds.add(cId);
+
+              final idx = _customers.indexWhere((c) => c.id == cId);
+              if (idx != -1) {
+                _customers[idx] = _customers[idx].copyWith(
+                  hasMarketingConsent: true,
+                  marketingConsentRecordedAt: res['recordedAt'] != null
+                      ? DateTime.tryParse(res['recordedAt'].toString()) ?? now
+                      : now,
+                  marketingConsentSource: source,
+                  marketingConsentEvidence: evidence,
+                  marketingConsentTextVersion: consentTextVersion,
+                  isOptedOut: false,
+                );
+              }
+            } else {
+              failed++;
+              final failedId = cId ?? res['phone']?.toString() ?? 'unknown';
+              failedCustomerIds.add(failedId);
+              failures.add({
+                'customerId': failedId,
+                'name': cust?.name ?? failedId,
+                'phone': res['phone'] ?? cust?.phone ?? '',
+                'error': res['error'] ?? 'Consent update rejected',
+              });
+            }
+          }
+        } else {
+          // If bulk API was completely unavailable (e.g. 404 or network down), report as failed
+          for (final id in chunkIds) {
+            failed++;
+            failedCustomerIds.add(id);
+            final cust = batchCustomerMap[id];
+            failures.add({
+              'customerId': id,
+              'name': cust?.name ?? id,
+              'phone': cust?.phone ?? '',
+              'error': response['error']?['message'] ?? 'Failed to communicate with consent server',
+            });
+          }
+        }
+
+        processedCount += chunkIds.length;
+        onProgress?.call(processedCount, totalToProcess);
+      }
+
+      // Single notification and single SharedPreferences write at the end!
+      notifyListeners();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_keyCustomers, jsonEncode(_customers.map((c) => c.toJson()).toList()));
+
+      return {
+        'success': failed == 0,
+        'totalRequested': customerIds.length,
+        'succeeded': succeeded,
+        'failed': failed,
+        'failures': failures,
+        'successfulCustomerIds': successfulCustomerIds,
+        'failedCustomerIds': failedCustomerIds,
+      };
+    } finally {
+      _isBulkRecordingConsent = false;
+    }
   }
 
   /// Syncs authoritative consent records from backend

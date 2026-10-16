@@ -196,12 +196,8 @@ router.post('/bulk-record', async (req: Request, res: Response) => {
   const { records, allowOptOutOverride } = parsed.data;
   const updatedBy = auth.userEmail || auth.userId;
 
-  let succeeded = 0;
-  let failed = 0;
-  const failures: Array<{ phone: string; customerId?: string; error: string }> = [];
-
-  for (const entry of records) {
-    const result = await consentStore.recordConsent({
+  const outcome = await consentStore.bulkRecordConsent({
+    records: records.map((entry) => ({
       phone: entry.phone,
       customerId: entry.customerId,
       consentCategory: 'marketing',
@@ -209,29 +205,19 @@ router.post('/bulk-record', async (req: Request, res: Response) => {
       source: entry.source,
       evidence: entry.evidence,
       consentTextVersion: entry.consentTextVersion || 'v2026.1_verbal_confirmed',
-      updatedBy,
-      isAuthorizedAdmin,
-      allowOptOutOverride,
-    });
-
-    if (result) {
-      succeeded++;
-    } else {
-      failed++;
-      failures.push({
-        phone: entry.phone,
-        customerId: entry.customerId,
-        error: 'Consent update rejected (possible opt-out override blocked)',
-      });
-    }
-  }
+    })),
+    updatedBy,
+    isAuthorizedAdmin,
+    allowOptOutOverride,
+  });
 
   res.status(200).json({
-    success: failed === 0,
-    totalRequested: records.length,
-    succeeded,
-    failed,
-    failures,
+    success: outcome.failed === 0,
+    totalRequested: outcome.totalRequested,
+    succeeded: outcome.succeeded,
+    failed: outcome.failed,
+    results: outcome.results,
+    failures: outcome.failures,
   });
 });
 

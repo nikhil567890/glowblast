@@ -29,6 +29,7 @@ export interface StoredMessage {
   errorTitle?: string;
   errorMessage?: string;
   errorDetails?: string;
+  repliedAt?: string;
   createdAt: string;
   updatedAt: string;
 }

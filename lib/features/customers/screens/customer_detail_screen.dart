@@ -1,13 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../../../data/models/customer.dart';
 import '../../../data/repositories/app_repository.dart';
 import 'add_edit_customer_screen.dart';
-import '../../campaigns/screens/campaign_wizard_screen.dart';
+import '../../campaigns/screens/direct_send_screen.dart';
 
 class CustomerDetailScreen extends StatefulWidget {
   final AppRepository repository;
@@ -286,9 +285,9 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
 
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (context) => CampaignWizardScreen(
+        builder: (context) => DirectSendScreen(
           repository: widget.repository,
-          preselectedAudience: 'Custom',
+          customer: customer,
         ),
       ),
     );
@@ -334,7 +333,6 @@ class _CustomerDetailScreenState extends State<CustomerDetailScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            const DemoRibbon(label: 'CUSTOMER DETAILS • WHATSAPP CONSENT REGISTRY'),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),

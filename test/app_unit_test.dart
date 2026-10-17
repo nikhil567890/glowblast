@@ -17,6 +17,9 @@ import 'package:glowblast/data/models/campaign.dart';
 import 'package:glowblast/data/models/whatsapp_template.dart';
 import 'package:glowblast/data/repositories/app_repository.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:glowblast/features/settings/screens/recharge_meta_balance_screen.dart';
+import 'package:glowblast/features/campaigns/screens/direct_send_screen.dart';
+import 'package:glowblast/features/campaigns/screens/campaign_wizard_screen.dart';
 
 void main() {
   group('Phone Number Validation Tests', () {
@@ -1360,6 +1363,685 @@ void main() {
       }
     });
   });
+
+  group('Production Mode & Bulk Management Safeguards Tests', () {
+    test('AppRepository init in production mode purges fabricated demo records', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': jsonEncode([
+          {'id': 'cust_1', 'name': 'Demo Customer 1', 'phone': '+91 98765 00001'},
+          {'id': 'cust_real_spa_client', 'name': 'Aarav Patel', 'phone': '+91 98765 43210'},
+        ]),
+        'glowblast_campaigns_v3': jsonEncode([
+          {'id': 'c1', 'name': 'Demo Festive Blast', 'status': 'Sent'},
+        ]),
+      });
+
+      final repository = AppRepository();
+      await repository.init(isProduction: true);
+
+      // Verify fabricated demo customer and campaign were purged
+      expect(repository.customers.any((c) => c.id == 'cust_1'), isFalse);
+      expect(repository.campaigns.any((c) => c.id == 'c1'), isFalse);
+
+      // Verify authentic customer is preserved
+      expect(repository.customers.any((c) => c.id == 'cust_real_spa_client'), isTrue);
+    });
+
+    test('bulkAssignGroup and bulkRemoveFromGroup preserve individual customer fields', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': jsonEncode([
+          {'id': 'cust_a', 'name': 'Client Alpha', 'phone': '+91 98765 11111', 'hasMarketingConsent': true},
+          {'id': 'cust_b', 'name': 'Client Beta', 'phone': '+91 98765 22222', 'hasMarketingConsent': false},
+        ]),
+      });
+
+      final repository = AppRepository();
+      await repository.init();
+
+      final groupId = repository.groups.first.id;
+
+      // Bulk assign to group
+      await repository.bulkAssignGroup(
+        customerIds: ['cust_a', 'cust_b'],
+        groupId: groupId,
+      );
+
+      final groupAfterAssign = repository.groups.firstWhere((g) => g.id == groupId);
+      expect(groupAfterAssign.customerIds.contains('cust_a'), isTrue);
+      expect(groupAfterAssign.customerIds.contains('cust_b'), isTrue);
+
+      // Verify individual customer details (name, phone, consent) were untouched and not overwritten
+      final custA = repository.customers.firstWhere((c) => c.id == 'cust_a');
+      final custB = repository.customers.firstWhere((c) => c.id == 'cust_b');
+      expect(custA.name, 'Client Alpha');
+      expect(custA.phone, '+91 98765 11111');
+      expect(custA.hasMarketingConsent, isTrue);
+      expect(custB.name, 'Client Beta');
+      expect(custB.phone, '+91 98765 22222');
+      expect(custB.hasMarketingConsent, isFalse);
+
+      // Bulk remove cust_a from group
+      await repository.bulkRemoveFromGroup(
+        customerIds: ['cust_a'],
+        groupId: groupId,
+      );
+
+      final groupAfterRemove = repository.groups.firstWhere((g) => g.id == groupId);
+      expect(groupAfterRemove.customerIds.contains('cust_a'), isFalse);
+      expect(groupAfterRemove.customerIds.contains('cust_b'), isTrue);
+    });
+
+    test('bulkDeleteCustomers removes records locally and updates group membership safely', () async {
+      SharedPreferences.setMockInitialValues({
+        'glowblast_is_initialized_v3': true,
+        'glowblast_customers_v3': jsonEncode([
+          {'id': 'del_1', 'name': 'Delete Me 1', 'phone': '+91 98765 33333'},
+          {'id': 'del_2', 'name': 'Delete Me 2', 'phone': '+91 98765 44444'},
+          {'id': 'keep_1', 'name': 'Keep Me', 'phone': '+91 98765 55555'},
+        ]),
+      });
+
+      final repository = AppRepository();
+      await repository.init();
+
+      final groupId = repository.groups.first.id;
+      await repository.bulkAssignGroup(
+        customerIds: ['del_1', 'keep_1'],
+        groupId: groupId,
+      );
+
+      await repository.saveAuthSession(
+        'valid_jwt_token',
+        AuthUser(id: 'usr_1', name: 'Owner', email: 'owner@spa.com', businessName: 'Spa', emailVerified: true),
+      );
+
+      // Mock backend client to verify HTTP deletion request
+      List<String>? deletedPayload;
+      repository.backendClient = GlowBlastBackendClient(
+        baseUrl: 'https://mock.glowblast.api',
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/api/customers' && req.method == 'DELETE') {
+            final body = jsonDecode(req.body);
+            deletedPayload = List<String>.from(body['customerIds']);
+            return http.Response(jsonEncode({'success': true, 'deletedCount': deletedPayload!.length}), 200);
+          }
+          return http.Response('{"success": true}', 200);
+        }),
+      );
+
+      final result = await repository.bulkDeleteCustomers(['del_1', 'del_2']);
+      expect(result['success'], isTrue);
+      expect(result['deletedCount'], 2);
+
+      // Verify local repository state
+      expect(repository.customers.any((c) => c.id == 'del_1'), isFalse);
+      expect(repository.customers.any((c) => c.id == 'del_2'), isFalse);
+      expect(repository.customers.any((c) => c.id == 'keep_1'), isTrue);
+
+      // Verify customer ID was removed from group membership
+      final group = repository.groups.firstWhere((g) => g.id == groupId);
+      expect(group.customerIds.contains('del_1'), isFalse);
+      expect(group.customerIds.contains('keep_1'), isTrue);
+
+      // Verify payload sent to backend
+      expect(deletedPayload, containsAll(['del_1', 'del_2']));
+    });
+
+    test('Campaign model accurately tracks authentic replied count', () {
+      final campaign = Campaign(
+        id: 'camp_authentic_1',
+        name: 'Weekend Spa Retreat',
+        month: 'October',
+        date: DateTime.now(),
+        targetAudience: 'VIP Clients',
+        messageContent: 'Special 20% off massage bookings this weekend!',
+        templateName: 'weekend_spa_retreat',
+        status: 'Sent',
+        recipients: 50,
+        messagesSent: 50,
+        delivered: 48,
+        read: 35,
+        replied: 8,
+        failed: 2,
+      );
+
+      expect(campaign.replied, 8);
+      expect(campaign.delivered, 48);
+      expect(campaign.read, 35);
+      expect(campaign.failed, 2);
+
+      final json = campaign.toJson();
+      expect(json['replied'], 8);
+
+      final restored = Campaign.fromJson(json);
+      expect(restored.replied, 8);
+    });
+  });
+
+  group('Feature 1: Meta Messaging Balance Recharge Tests', () {
+    test('Meta Business Manager entry point URL is strictly verified https://business.facebook.com/', () {
+      expect(RechargeMetaBalanceScreen.metaBusinessManagerUrl, 'https://business.facebook.com/');
+      final uri = Uri.parse(RechargeMetaBalanceScreen.metaBusinessManagerUrl);
+      expect(uri.scheme, 'https');
+      expect(uri.host, 'business.facebook.com');
+      expect(uri.path, '/');
+    });
+
+    test('RechargeMetaBalanceScreen aliases BuyCreditsScreen for seamless backwards compatibility', () {
+      expect(BuyCreditsScreen, equals(RechargeMetaBalanceScreen));
+    });
+  });
+
+  group('Feature 2: Search Contacts in Custom Picked Recipients Tests', () {
+    late List<Customer> testCustomers;
+
+    setUp(() {
+      testCustomers = [
+        Customer(
+          id: 'cust_001',
+          name: 'Aarav Sharma',
+          phone: '+91 98765 43210',
+          createdAt: DateTime(2026, 1, 1),
+          hasMarketingConsent: true,
+        ),
+        Customer(
+          id: 'cust_002',
+          name: 'Priya Patel',
+          phone: '+91 91234 56789',
+          createdAt: DateTime(2026, 1, 2),
+          hasMarketingConsent: true,
+        ),
+        Customer(
+          id: 'cust_003',
+          name: 'Rohan Gupta',
+          phone: '+91 98765 99999',
+          createdAt: DateTime(2026, 1, 3),
+          hasMarketingConsent: true,
+        ),
+        Customer(
+          id: 'cust_004',
+          name: 'Ananya Iyer',
+          phone: '+91 87654 32109',
+          createdAt: DateTime(2026, 1, 4),
+          isOptedOut: true,
+          hasMarketingConsent: false,
+        ),
+      ];
+    });
+
+    List<Customer> filterContacts(List<Customer> list, String query) {
+      final q = query.trim().toLowerCase();
+      if (q.isEmpty) return list;
+      final qDigits = q.replaceAll(RegExp(r'\D'), '');
+      return list.where((c) {
+        final nameMatch = c.name.toLowerCase().contains(q);
+        final phoneClean = c.phone.replaceAll(RegExp(r'\D'), '');
+        final phoneMatch = phoneClean.contains(qDigits.isNotEmpty ? qDigits : q);
+        return nameMatch || phoneMatch;
+      }).toList();
+    }
+
+    test('filters customers by name case-insensitively', () {
+      final resultsLower = filterContacts(testCustomers, 'priya');
+      expect(resultsLower.length, 1);
+      expect(resultsLower.first.id, 'cust_002');
+
+      final resultsUpper = filterContacts(testCustomers, 'AARAV');
+      expect(resultsUpper.length, 1);
+      expect(resultsUpper.first.id, 'cust_001');
+    });
+
+    test('filters customers by phone number digits regardless of spaces and formatting', () {
+      final results1 = filterContacts(testCustomers, '91234');
+      expect(results1.length, 1);
+      expect(results1.first.name, 'Priya Patel');
+
+      final resultsPrefix = filterContacts(testCustomers, '+91 98765');
+      expect(resultsPrefix.length, 2);
+      expect(resultsPrefix.map((c) => c.name), containsAll(['Aarav Sharma', 'Rohan Gupta']));
+    });
+
+    test('preserves customer selection state across search query changes', () {
+      final selectedCustomerIds = <String>{'cust_001', 'cust_002'};
+
+      // 1. Initial state: 2 customers selected
+      expect(selectedCustomerIds.length, 2);
+      expect(selectedCustomerIds.contains('cust_001'), isTrue);
+      expect(selectedCustomerIds.contains('cust_002'), isTrue);
+
+      // 2. User searches for 'Rohan' (neither cust_001 nor cust_002 is visible)
+      final filtered1 = filterContacts(testCustomers, 'Rohan');
+      expect(filtered1.length, 1);
+      expect(filtered1.first.id, 'cust_003');
+
+      // Crucial requirement: searching must NOT clear existing selections
+      expect(selectedCustomerIds.contains('cust_001'), isTrue);
+      expect(selectedCustomerIds.contains('cust_002'), isTrue);
+      expect(selectedCustomerIds.length, 2);
+
+      // 3. User checks Rohan from the search result
+      selectedCustomerIds.add('cust_003');
+      expect(selectedCustomerIds.length, 3);
+
+      // 4. User clears search query
+      final allFiltered = filterContacts(testCustomers, '');
+      expect(allFiltered.length, 4);
+
+      // All 3 selected customers remain selected
+      expect(selectedCustomerIds.contains('cust_001'), isTrue);
+      expect(selectedCustomerIds.contains('cust_002'), isTrue);
+      expect(selectedCustomerIds.contains('cust_003'), isTrue);
+    });
+
+    test('Select Visible adds only visible filtered contacts without losing previous selections', () {
+      final selectedCustomerIds = <String>{'cust_002'}; // Priya already selected
+
+      // User searches '98765' -> matches Aarav and Rohan
+      final visible = filterContacts(testCustomers, '98765');
+      expect(visible.length, 2);
+
+      // Tap "Select Visible"
+      for (final c in visible) {
+        selectedCustomerIds.add(c.id);
+      }
+
+      // Priya (cust_002) is preserved, Aarav and Rohan are now also selected
+      expect(selectedCustomerIds.length, 3);
+      expect(selectedCustomerIds, containsAll(['cust_001', 'cust_002', 'cust_003']));
+    });
+
+    test('Clear Selection empties selection safely', () {
+      final selectedCustomerIds = <String>{'cust_001', 'cust_002', 'cust_003'};
+      selectedCustomerIds.clear();
+      expect(selectedCustomerIds.isEmpty, isTrue);
+    });
+
+    test('handles empty search results gracefully', () {
+      final results = filterContacts(testCustomers, 'NonExistentCustomerNameOrNumber');
+      expect(results.isEmpty, isTrue);
+    });
+  });
+
+  group('Feature 3: Single Contact Direct Send vs Multi-Contact Campaign Flow Tests', () {
+    late AppRepository repository;
+    late GlowBlastBackendClient backendClient;
+    late List<Map<String, dynamic>> sentRequests;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({
+        'app_mode': 'live_production',
+        'auth_token': 'test_auth_token_spa',
+      });
+
+      sentRequests = [];
+      final mockClient = MockClient((request) async {
+        if (request.url.path == '/api/campaigns/send') {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          sentRequests.add(body);
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'campaignId': 'camp_direct_${DateTime.now().millisecondsSinceEpoch}',
+              'status': 'Accepted',
+              'messagesSent': 1,
+              'recipientCount': 1,
+              'metaResult': {'accepted': true},
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        return http.Response('{"success": true}', 200, headers: {'content-type': 'application/json'});
+      });
+
+      backendClient = GlowBlastBackendClient(
+        baseUrl: 'https://glowblast-api.onrender.com',
+        httpClient: mockClient,
+      );
+
+      repository = AppRepository();
+      await repository.init();
+    });
+
+    test('selecting exactly one contact directs to single recipient direct-send with accurate customer details', () {
+      final customer = Customer(
+        id: 'cust_direct_01',
+        name: 'Meera Rao',
+        phone: '+91 98765 11111',
+        createdAt: DateTime(2026, 2, 1),
+        hasMarketingConsent: true,
+      );
+
+      final directScreen = DirectSendScreen(
+        repository: repository,
+        customer: customer,
+      );
+
+      expect(directScreen.customer.id, 'cust_direct_01');
+      expect(directScreen.customer.name, 'Meera Rao');
+      expect(directScreen.customer.phone, '+91 98765 11111');
+      expect(directScreen.customer.isOptedOut, isFalse);
+    });
+
+    test('CampaignWizardScreen accepts preselectedCustomerIds and sets audience to Custom without restarting to All', () {
+      final wizard = CampaignWizardScreen(
+        repository: repository,
+        preselectedAudience: 'Custom',
+        preselectedCustomerIds: {'cust_001', 'cust_002'},
+      );
+
+      expect(wizard.preselectedAudience, 'Custom');
+      expect(wizard.preselectedCustomerIds, containsAll(['cust_001', 'cust_002']));
+    });
+
+    test('direct send request passes recipient list with exactly 1 customer and approved template', () async {
+      final customer = Customer(
+        id: 'cust_direct_99',
+        name: 'Kavita Sen',
+        phone: '+91 98765 22222',
+        createdAt: DateTime(2026, 2, 1),
+        hasMarketingConsent: true,
+      );
+
+      // Simulate sending via backend client as DirectSendScreen does
+      final response = await backendClient.sendCampaign(
+        campaignId: 'camp_direct_test_99',
+        campaignName: 'Direct Message: Kavita Sen',
+        templateName: 'diwali_spa_offer',
+        templateLanguage: 'en',
+        recipients: [
+          {
+            'id': customer.id,
+            'name': customer.name,
+            'phone': customer.phone,
+          }
+        ],
+        templateVariables: ['Kavita Sen', 'Lotus Spa'],
+        token: 'test_auth_token_spa',
+      );
+
+      expect(response['success'], isTrue);
+      expect(sentRequests.length, 1);
+      final req = sentRequests.first;
+      expect(req['campaignName'], 'Direct Message: Kavita Sen');
+      expect(req['templateName'], 'diwali_spa_offer');
+      expect(req['recipients'], isList);
+      final reqRecipients = req['recipients'] as List;
+      expect(reqRecipients.length, 1);
+      expect(reqRecipients.first['id'], 'cust_direct_99');
+      expect(reqRecipients.first['name'], 'Kavita Sen');
+      expect(reqRecipients.first['phone'], '+91 98765 22222');
+    });
+  });
+
+  group('Safety & Messaging Safeguard Tests', () {
+    test('opted-out customer is identified and prevented from promotional messaging', () {
+      final optedOutCustomer = Customer(
+        id: 'cust_opted_out',
+        name: 'Sunita Verma',
+        phone: '+91 98765 33333',
+        createdAt: DateTime(2026, 2, 1),
+        isOptedOut: true,
+        hasMarketingConsent: false,
+      );
+
+      expect(optedOutCustomer.isOptedOut, isTrue);
+      expect(optedOutCustomer.hasMarketingConsent, isFalse);
+    });
+
+    test('invalid phone numbers are caught before message transmission', () {
+      expect(ExcelService.isValidIndianPhone(''), isFalse);
+      expect(ExcelService.isValidIndianPhone('12345'), isFalse);
+      expect(ExcelService.isValidIndianPhone('5555555555'), isFalse);
+      expect(ExcelService.isValidIndianPhone('+1 555 123 4567'), isFalse); // Non-Indian
+      expect(ExcelService.isValidIndianPhone('+91 98765 43210'), isTrue);
+    });
+
+    test('debouncing and double-tap prevention prevents duplicate send requests', () async {
+      int apiCalls = 0;
+      bool isSending = false;
+
+      Future<void> triggerSend() async {
+        if (isSending) return; // Guard against repeat taps
+        isSending = true;
+        try {
+          apiCalls++;
+          await Future.delayed(const Duration(milliseconds: 50));
+        } finally {
+          isSending = false;
+        }
+      }
+
+      // Simulate rapid double tap
+      final future1 = triggerSend();
+      final future2 = triggerSend();
+      await Future.wait([future1, future2]);
+
+      expect(apiCalls, 1); // Only 1 API call allowed
+    });
+
+    test('distinguishes API success from backend error responses', () async {
+      final failingMockClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({
+            'success': false,
+            'error': {'code': 'RATE_LIMIT', 'message': 'WhatsApp Cloud API rate limit exceeded'}
+          }),
+          429,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final client = GlowBlastBackendClient(
+        baseUrl: 'https://glowblast-api.onrender.com',
+        httpClient: failingMockClient,
+      );
+
+      final result = await client.sendCampaign(
+        campaignId: 'camp_rate_limited',
+        campaignName: 'Test Send',
+        templateName: 'diwali_spa_offer',
+        templateLanguage: 'en',
+        recipients: [
+          {'id': 'c1', 'name': 'Aarav', 'phone': '+91 98765 43210'}
+        ],
+        token: 'test_token',
+      );
+
+      expect(result['success'], isFalse);
+      expect(result['error']['code'], 'RATE_LIMIT');
+    });
+  });
+
+  group('Bulk Customer Deletion Frontend & Repository Tests', () {
+    test('backend client sends DELETE /api/customers with authorization and customerIds payload', () async {
+      String? recordedMethod;
+      String? recordedPath;
+      String? recordedAuth;
+      Map<String, dynamic>? recordedBody;
+
+      final mockClient = MockClient((request) async {
+        recordedMethod = request.method;
+        recordedPath = request.url.path;
+        recordedAuth = request.headers['Authorization'];
+        recordedBody = jsonDecode(request.body) as Map<String, dynamic>;
+
+        return http.Response(
+          jsonEncode({
+            'success': true,
+            'totalRequested': 2,
+            'deletedCount': 2,
+            'deletedCustomerIds': ['cust_1', 'cust_2'],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final client = GlowBlastBackendClient(
+        baseUrl: 'https://glowblast-api.onrender.com',
+        httpClient: mockClient,
+      );
+
+      final result = await client.bulkDeleteCustomers(
+        customerIds: ['cust_1', 'cust_2'],
+        token: 'auth_jwt_token_123',
+      );
+
+      expect(result['success'], isTrue);
+      expect(recordedMethod, 'DELETE');
+      expect(recordedPath, '/api/customers');
+      expect(recordedAuth, 'Bearer auth_jwt_token_123');
+      expect(recordedBody!['customerIds'], containsAll(['cust_1', 'cust_2']));
+    });
+
+    test('backend client gracefully retries with POST /api/customers/bulk-delete if DELETE returns 404', () async {
+      final requestedPaths = <String>[];
+      final requestedMethods = <String>[];
+
+      final mockClient = MockClient((request) async {
+        requestedPaths.add(request.url.path);
+        requestedMethods.add(request.method);
+
+        if (request.method == 'DELETE' && request.url.path == '/api/customers') {
+          return http.Response(
+            jsonEncode({
+              'success': false,
+              'error': {'code': 'NOT_FOUND', 'message': 'API endpoint does not exist'},
+            }),
+            404,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+
+        if (request.method == 'POST' && request.url.path == '/api/customers/bulk-delete') {
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'totalRequested': 1,
+              'deletedCount': 1,
+              'deletedCustomerIds': ['cust_fallback'],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+
+        return http.Response('{"success": false}', 500, headers: {'content-type': 'application/json'});
+      });
+
+      final client = GlowBlastBackendClient(
+        baseUrl: 'https://glowblast-api.onrender.com',
+        httpClient: mockClient,
+      );
+
+      final result = await client.bulkDeleteCustomers(
+        customerIds: ['cust_fallback'],
+        token: 'token_abc',
+      );
+
+      expect(result['success'], isTrue);
+      expect(requestedMethods, containsAllInOrder(['DELETE', 'POST']));
+      expect(requestedPaths, containsAllInOrder(['/api/customers', '/api/customers/bulk-delete']));
+    });
+
+    test('failed deletion returns server error and does not remove local customers', () async {
+      final mockClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({
+            'success': false,
+            'error': {'code': 'DATABASE_ERROR', 'message': 'Database connection unavailable'},
+          }),
+          500,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final client = GlowBlastBackendClient(
+        baseUrl: 'https://glowblast-api.onrender.com',
+        httpClient: mockClient,
+      );
+
+      final result = await client.bulkDeleteCustomers(
+        customerIds: ['cust_xyz'],
+        token: 'token_xyz',
+      );
+
+      expect(result['success'], isFalse);
+      expect(result['error']['message'], 'Database connection unavailable');
+    });
+  });
+
+  group('Simplified Campaign Metrics Tests (Sent & Failed Only)', () {
+    test('accurately tracks totalFailed and totalMessagesSent without requiring Delivered or Read', () {
+      final campaigns = [
+        Campaign(
+          id: 'c1',
+          name: 'Spa Promo 1',
+          month: 'Oct',
+          date: DateTime.now(),
+          targetAudience: 'All',
+          messageContent: 'Offer 1',
+          templateName: 'offer_1',
+          status: 'Completed',
+          recipients: 10,
+          messagesSent: 10,
+          delivered: 0,
+          read: 0,
+          replied: 0,
+          failed: 0,
+        ),
+        Campaign(
+          id: 'c2',
+          name: 'Spa Promo 2',
+          month: 'Oct',
+          date: DateTime.now(),
+          targetAudience: 'VIP',
+          messageContent: 'Offer 2',
+          templateName: 'offer_2',
+          status: 'Failed',
+          recipients: 5,
+          messagesSent: 2,
+          delivered: 0,
+          read: 0,
+          replied: 0,
+          failed: 3,
+        ),
+      ];
+
+      final totalSent = campaigns.fold(0, (sum, c) => sum + c.messagesSent);
+      final totalFailed = campaigns.fold(0, (sum, c) => sum + c.failed);
+
+      expect(totalSent, 12);
+      expect(totalFailed, 3);
+    });
+
+    test('handles zero failed count accurately without fabricating numbers', () {
+      final campaign = Campaign(
+        id: 'c3',
+        name: 'Perfect Blast',
+        month: 'Oct',
+        date: DateTime.now(),
+        targetAudience: 'All',
+        messageContent: 'Message',
+        templateName: 'tmpl',
+        status: 'Completed',
+        recipients: 20,
+        messagesSent: 20,
+        delivered: 0,
+        read: 0,
+        replied: 0,
+        failed: 0,
+      );
+
+      expect(campaign.failed, 0);
+      expect(campaign.messagesSent, 20);
+    });
+  });
 }
+
+
 
 

@@ -171,7 +171,7 @@ class AppRepository extends ChangeNotifier {
     return sentCampaigns.reduce((a, b) => a.read > b.read ? a : b);
   }
 
-  Future<void> init() async {
+  Future<void> init({bool isProduction = false}) async {
     _isLoading = true;
     notifyListeners();
 
@@ -180,20 +180,20 @@ class AppRepository extends ChangeNotifier {
       final isInitialized = prefs.getBool(_keyInitializedV3) ?? false;
 
       if (!isInitialized) {
-        await _seedInitialData(prefs);
+        await _seedInitialData(prefs, isProduction: isProduction);
       } else {
-        await _loadFromPrefs(prefs);
+        await _loadFromPrefs(prefs, isProduction: isProduction);
       }
     } catch (e) {
       debugPrint('Error loading local data: $e');
-      _fallbackToMemory();
+      _fallbackToMemory(isProduction: isProduction);
     } finally {
       _isLoading = false;
       notifyListeners();
     }
   }
 
-  Future<void> _seedInitialData(SharedPreferences prefs) async {
+  Future<void> _seedInitialData(SharedPreferences prefs, {bool isProduction = false}) async {
     // Migration: clean up legacy keys
     await prefs.remove('glowblast_customers');
     await prefs.remove('glowblast_campaigns');
@@ -202,28 +202,36 @@ class AppRepository extends ChangeNotifier {
     await prefs.remove('glowblast_settings');
     await prefs.remove('glowblast_is_initialized_v2');
 
-    _customers = InitialData.generate200Customers();
-    _campaigns = [
-      ...InitialData.getPreloadedCampaigns(),
-      ...InitialData.getScheduledCampaigns(),
-    ];
-    _groups = InitialData.getInitialGroups(_customers);
-    _templates = InitialData.getInitialTemplates();
-    _settings = AppSettings();
+    if (isProduction) {
+      _customers = [];
+      _campaigns = [];
+      _groups = InitialData.getInitialGroups([]);
+      _templates = InitialData.getInitialTemplates();
+      _settings = AppSettings(messagingMode: 'production');
+    } else {
+      _customers = InitialData.generate200Customers();
+      _campaigns = [
+        ...InitialData.getPreloadedCampaigns(),
+        ...InitialData.getScheduledCampaigns(),
+      ];
+      _groups = InitialData.getInitialGroups(_customers);
+      _templates = InitialData.getInitialTemplates();
+      _settings = AppSettings();
+    }
     backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
 
     await _saveAll(prefs);
     await prefs.setBool(_keyInitializedV3, true);
   }
 
-  Future<void> _loadFromPrefs(SharedPreferences prefs) async {
+  Future<void> _loadFromPrefs(SharedPreferences prefs, {bool isProduction = false}) async {
     // Customers
     final custRaw = prefs.getString(_keyCustomers);
     if (custRaw != null) {
       final List<dynamic> list = jsonDecode(custRaw);
       _customers = list.map((e) => Customer.fromJson(e as Map<String, dynamic>)).toList();
     } else {
-      _customers = InitialData.generate200Customers();
+      _customers = isProduction ? [] : InitialData.generate200Customers();
     }
 
     // Campaigns
@@ -232,10 +240,12 @@ class AppRepository extends ChangeNotifier {
       final List<dynamic> list = jsonDecode(campRaw);
       _campaigns = list.map((e) => Campaign.fromJson(e as Map<String, dynamic>)).toList();
     } else {
-      _campaigns = [
-        ...InitialData.getPreloadedCampaigns(),
-        ...InitialData.getScheduledCampaigns(),
-      ];
+      _campaigns = isProduction
+          ? []
+          : [
+              ...InitialData.getPreloadedCampaigns(),
+              ...InitialData.getScheduledCampaigns(),
+            ];
     }
 
     // Groups
@@ -271,7 +281,33 @@ class AppRepository extends ChangeNotifier {
         await prefs.setString(_keySettings, jsonEncode(_settings.toJson()));
       }
     } else {
-      _settings = AppSettings();
+      _settings = AppSettings(messagingMode: isProduction ? 'production' : 'demo');
+    }
+
+    // In production execution mode, strictly purge fabricated demo customers and demo campaigns
+    if (isProduction) {
+      final demoCustPattern = RegExp(r'^cust_([1-9]|[1-9][0-9]|1[0-9][0-9]|200)$');
+      final demoIdsToRemove = _customers
+          .where((c) => demoCustPattern.hasMatch(c.id) || c.id == 'cust_meta_tester')
+          .map((c) => c.id)
+          .toSet();
+
+      if (demoIdsToRemove.isNotEmpty) {
+        _customers.removeWhere((c) => demoIdsToRemove.contains(c.id));
+        for (final g in _groups) {
+          g.customerIds.removeWhere((id) => demoIdsToRemove.contains(id));
+        }
+      }
+
+      // Remove demo preloaded campaigns
+      const demoCampIds = {'c1', 'c2', 'c3', 'c4', 'c5', 'c6'};
+      _campaigns.removeWhere((c) => demoCampIds.contains(c.id));
+
+      if (_settings.messagingMode != 'production') {
+        _settings = _settings.copyWith(messagingMode: 'production');
+      }
+
+      await _saveAll(prefs);
     }
 
     // Load persisted auth session
@@ -291,21 +327,23 @@ class AppRepository extends ChangeNotifier {
       authToken: _authToken,
     );
 
-    // Ensure authorized Meta test recipient is in directory
-    final hasTester = _customers.any((c) =>
-      c.phone.replaceAll(RegExp(r'\D'), '').endsWith('9182769155')
-    );
-    if (!hasTester) {
-      final insertIndex = 12 < _customers.length ? 12 : 0;
-      _customers.insert(
-        insertIndex,
-        Customer(
-          id: 'cust_meta_tester',
-          name: 'Authorized Meta Tester',
-          phone: '+91 91827 69155',
-          isOptedOut: false,
-        ),
+    // Only inject Meta test recipient if running in non-production developer test mode
+    if (!isProduction) {
+      final hasTester = _customers.any((c) =>
+        c.phone.replaceAll(RegExp(r'\D'), '').endsWith('9182769155')
       );
+      if (!hasTester) {
+        final insertIndex = 12 < _customers.length ? 12 : 0;
+        _customers.insert(
+          insertIndex,
+          Customer(
+            id: 'cust_meta_tester',
+            name: 'Authorized Meta Tester',
+            phone: '+91 91827 69155',
+            isOptedOut: false,
+          ),
+        );
+      }
     }
   }
 
@@ -331,15 +369,23 @@ class AppRepository extends ChangeNotifier {
     await prefs.remove(_keyAuthUser);
   }
 
-  void _fallbackToMemory() {
-    _customers = InitialData.generate200Customers();
-    _campaigns = [
-      ...InitialData.getPreloadedCampaigns(),
-      ...InitialData.getScheduledCampaigns(),
-    ];
-    _groups = InitialData.getInitialGroups(_customers);
-    _templates = InitialData.getInitialTemplates();
-    _settings = AppSettings();
+  void _fallbackToMemory({bool isProduction = false}) {
+    if (isProduction) {
+      _customers = [];
+      _campaigns = [];
+      _groups = InitialData.getInitialGroups([]);
+      _templates = InitialData.getInitialTemplates();
+      _settings = AppSettings(messagingMode: 'production');
+    } else {
+      _customers = InitialData.generate200Customers();
+      _campaigns = [
+        ...InitialData.getPreloadedCampaigns(),
+        ...InitialData.getScheduledCampaigns(),
+      ];
+      _groups = InitialData.getInitialGroups(_customers);
+      _templates = InitialData.getInitialTemplates();
+      _settings = AppSettings();
+    }
     backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl, authToken: _authToken);
   }
 
@@ -371,6 +417,18 @@ class AppRepository extends ChangeNotifier {
   }
 
   Future<void> deleteCustomer(String id) async {
+    // If authenticated, sync deletion to backend database
+    if (_authToken != null && _authToken!.trim().isNotEmpty) {
+      try {
+        await backendClient.bulkDeleteCustomers(
+          customerIds: [id],
+          token: _authToken,
+        );
+      } catch (e) {
+        debugPrint('[AppRepository] deleteCustomer server error: $e');
+      }
+    }
+
     _customers.removeWhere((c) => c.id == id);
     for (final group in _groups) {
       group.customerIds.remove(id);
@@ -379,6 +437,96 @@ class AppRepository extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyCustomers, jsonEncode(_customers.map((c) => c.toJson()).toList()));
     await prefs.setString(_keyGroups, jsonEncode(_groups.map((g) => g.toJson()).toList()));
+  }
+
+  /// Bulk deletes a list of customers with backend database verification and local cleanup.
+  /// Preserves audit trail and campaign history (relational safety).
+  Future<Map<String, dynamic>> bulkDeleteCustomers(List<String> customerIds) async {
+    if (customerIds.isEmpty) {
+      return {'success': true, 'deletedCount': 0, 'deletedIds': <String>[]};
+    }
+
+    // Call backend API if user is authenticated to delete from server database
+    if (_authToken != null && _authToken!.trim().isNotEmpty) {
+      try {
+        final backendRes = await backendClient.bulkDeleteCustomers(
+          customerIds: customerIds,
+          token: _authToken,
+        );
+        if (backendRes['success'] != true) {
+          return backendRes;
+        }
+      } catch (e) {
+        debugPrint('[AppRepository] bulkDeleteCustomers backend error: $e');
+        return {
+          'success': false,
+          'error': {
+            'code': 'NETWORK_ERROR',
+            'message': 'Failed to communicate with server. Please try again.',
+          },
+        };
+      }
+    }
+
+    final idSet = customerIds.toSet();
+    _customers.removeWhere((c) => idSet.contains(c.id));
+    for (final group in _groups) {
+      group.customerIds.removeWhere((id) => idSet.contains(id));
+    }
+
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyCustomers, jsonEncode(_customers.map((c) => c.toJson()).toList()));
+    await prefs.setString(_keyGroups, jsonEncode(_groups.map((g) => g.toJson()).toList()));
+
+    return {
+      'success': true,
+      'deletedCount': customerIds.length,
+      'deletedIds': customerIds,
+    };
+  }
+
+  /// Adds a list of customer IDs to an existing group without altering customer-specific fields
+  Future<int> bulkAssignGroup({required List<String> customerIds, required String groupId}) async {
+    final idx = _groups.indexWhere((g) => g.id == groupId);
+    if (idx == -1) return 0;
+
+    final group = _groups[idx];
+    final existingSet = group.customerIds.toSet();
+    int added = 0;
+    for (final id in customerIds) {
+      if (!existingSet.contains(id)) {
+        group.customerIds.add(id);
+        existingSet.add(id);
+        added++;
+      }
+    }
+
+    if (added > 0) {
+      notifyListeners();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_keyGroups, jsonEncode(_groups.map((g) => g.toJson()).toList()));
+    }
+    return added;
+  }
+
+  /// Removes a list of customer IDs from an existing group
+  Future<int> bulkRemoveFromGroup({required List<String> customerIds, required String groupId}) async {
+    final idx = _groups.indexWhere((g) => g.id == groupId);
+    if (idx == -1) return 0;
+
+    final group = _groups[idx];
+    final idSet = customerIds.toSet();
+    final initialLen = group.customerIds.length;
+    group.customerIds.removeWhere((id) => idSet.contains(id));
+    final removed = initialLen - group.customerIds.length;
+
+    if (removed > 0) {
+      notifyListeners();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_keyGroups, jsonEncode(_groups.map((g) => g.toJson()).toList()));
+    }
+    return removed;
   }
 
   Future<void> toggleOptOut(String customerId, bool isOptedOut) async {

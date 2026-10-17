@@ -33,12 +33,13 @@ export class MessageStore {
       error_title: string | null;
       error_message: string | null;
       error_details: string | null;
+      replied_at: Date | null;
       created_at: Date;
       updated_at: Date;
     }>(
       `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
               provider_message_id, template_name, template_language,
-              error_code, error_title, error_message, error_details, created_at, updated_at
+              error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
        FROM campaign_messages
        WHERE id = $1
        LIMIT 1;`,
@@ -57,7 +58,7 @@ export class MessageStore {
     const res = await pool.query(
       `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
               provider_message_id, template_name, template_language,
-              error_code, error_title, error_message, error_details, created_at, updated_at
+              error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
        FROM campaign_messages
        WHERE provider_message_id = $1
        LIMIT 1;`,
@@ -76,7 +77,7 @@ export class MessageStore {
     const res = await pool.query(
       `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
               provider_message_id, template_name, template_language,
-              error_code, error_title, error_message, error_details, created_at, updated_at
+              error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
        FROM campaign_messages
        WHERE campaign_id = $1
        ORDER BY created_at ASC;`,
@@ -244,6 +245,22 @@ export class MessageStore {
   }
 
   /**
+   * Idempotently records an inbound WhatsApp reply timestamp on the message.
+   * Returns true if newly marked, false if already marked.
+   */
+  public async recordReply(id: string): Promise<boolean> {
+    const pool = getPool();
+    const res = await pool.query(
+      `UPDATE campaign_messages
+       SET replied_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND replied_at IS NULL
+       RETURNING id;`,
+      [id]
+    );
+    return (res.rowCount || 0) > 0;
+  }
+
+  /**
    * Clears messages table (used strictly in test fixtures).
    */
   public async clear(): Promise<void> {
@@ -266,6 +283,7 @@ export class MessageStore {
       errorTitle: row.error_title || undefined,
       errorMessage: row.error_message || undefined,
       errorDetails: row.error_details || undefined,
+      repliedAt: row.replied_at ? new Date(row.replied_at).toISOString() : undefined,
       createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
       updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
     };

@@ -18,6 +18,7 @@ export class CampaignStore {
       count_sent: number;
       count_delivered: number;
       count_read: number;
+      count_replied?: number;
       count_failed: number;
       count_excluded_opt_out: number;
       created_at: Date;
@@ -25,7 +26,7 @@ export class CampaignStore {
     }>(
       `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
               total_recipients, count_queued, count_accepted, count_sent, count_delivered,
-              count_read, count_failed, count_excluded_opt_out, created_at, updated_at
+              count_read, COALESCE(count_replied, 0) AS count_replied, count_failed, count_excluded_opt_out, created_at, updated_at
        FROM campaigns
        WHERE campaign_id = $1
        LIMIT 1;`,
@@ -50,6 +51,7 @@ export class CampaignStore {
       sent: row.count_sent,
       delivered: row.count_delivered,
       read: row.count_read,
+      replied: row.count_replied ?? messages.filter((m) => !!m.repliedAt).length,
       failed: row.count_failed,
       excludedOptOut: row.count_excluded_opt_out,
       messages,
@@ -81,6 +83,7 @@ export class CampaignStore {
     const sent = msgs.filter((m) => ['sent', 'delivered', 'read'].includes(m.status)).length;
     const delivered = msgs.filter((m) => ['delivered', 'read'].includes(m.status)).length;
     const read = msgs.filter((m) => m.status === 'read').length;
+    const replied = msgs.filter((m) => !!m.repliedAt).length;
     const failed = msgs.filter((m) => ['failed', 'uncertain_timeout'].includes(m.status)).length;
     const excludedOptOut = msgs.filter((m) => m.status === 'excluded_opt_out').length;
 
@@ -97,6 +100,7 @@ export class CampaignStore {
       sent,
       delivered,
       read,
+      replied,
       failed,
       excludedOptOut,
       createdAt: camp.createdAt,
@@ -150,8 +154,9 @@ export class CampaignStore {
            count_sent = $5,
            count_delivered = $6,
            count_read = $7,
-           count_failed = $8,
-           count_excluded_opt_out = $9,
+           count_replied = $8,
+           count_failed = $9,
+           count_excluded_opt_out = $10,
            updated_at = NOW()
        WHERE campaign_id = $1;`,
       [
@@ -162,6 +167,7 @@ export class CampaignStore {
         summary.sent,
         summary.delivered,
         summary.read,
+        summary.replied,
         summary.failed,
         summary.excludedOptOut,
       ]

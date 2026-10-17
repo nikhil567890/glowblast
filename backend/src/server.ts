@@ -11,6 +11,7 @@ import webhookRouter from './routes/webhook';
 import templatesRouter from './routes/templates';
 import authRouter from './routes/auth';
 import consentRouter from './routes/consent';
+import customersRouter from './routes/customers';
 
 export const app = express();
 
@@ -65,13 +66,13 @@ app.use('/api/webhook', webhookRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/consent', consentRouter);
+app.use('/api/customers', customersRouter);
 
 // Root informational endpoint
 app.get('/', (_req, res) => {
   res.json({
     service: 'GlowBlast Backend API',
     status: 'online',
-    mode: 'REAL_WHATSAPP_TEST_MODE',
     docs: '/api/health',
   });
 });

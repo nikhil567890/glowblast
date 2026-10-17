@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../../../data/models/customer.dart';
@@ -10,17 +9,20 @@ import '../../../data/models/whatsapp_template.dart';
 import '../../../data/repositories/app_repository.dart';
 import '../../customers/screens/customers_screen.dart';
 import 'sending_simulation_screen.dart';
+import 'direct_send_screen.dart';
 
 class CampaignWizardScreen extends StatefulWidget {
   final AppRepository repository;
   final String? preselectedAudience;
   final String? preselectedTemplateId;
+  final Set<String>? preselectedCustomerIds;
 
   const CampaignWizardScreen({
     super.key,
     required this.repository,
     this.preselectedAudience,
     this.preselectedTemplateId,
+    this.preselectedCustomerIds,
   });
 
   @override
@@ -35,6 +37,8 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
   // 'All', 'Custom', or a group ID
   String _selectedAudienceType = 'All';
   final Set<String> _customCustomerIds = {};
+  final TextEditingController _customSearchController = TextEditingController();
+  String _customSearchQuery = '';
 
   // Step 2: Message & Template
   WhatsAppTemplate? _selectedTemplate;
@@ -108,13 +112,18 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
     String initialMsg = _selectedTemplate?.body ??
         '🌸 Monsoon Glow Special! Indulge in our soothing Aromatherapy or Facial with flat 30% OFF this week at $biz. Reply YES to reserve your slot!';
 
-    if (widget.preselectedAudience != null) {
+    if (widget.preselectedCustomerIds != null && widget.preselectedCustomerIds!.isNotEmpty) {
+      _selectedAudienceType = 'Custom';
+      _customCustomerIds.addAll(widget.preselectedCustomerIds!);
+    } else if (widget.preselectedAudience != null) {
       final a = widget.preselectedAudience!;
-      if (a == 'All' || a.contains('All')) {
+      if (a == 'Custom' || a.contains('Custom')) {
+        _selectedAudienceType = 'Custom';
+      } else if (a == 'All' || a.contains('All')) {
         _selectedAudienceType = 'All';
       } else {
         // Check if matches a group
-        final match = widget.repository.groups.where((g) => g.name == a).firstOrNull;
+        final match = widget.repository.groups.where((g) => g.name == a || g.id == a).firstOrNull;
         if (match != null) {
           _selectedAudienceType = match.id;
         } else {
@@ -129,6 +138,7 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
 
   @override
   void dispose() {
+    _customSearchController.dispose();
     _campaignNameController.dispose();
     _messageController.dispose();
     super.dispose();
@@ -510,8 +520,6 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            const DemoRibbon(label: 'WHATSAPP BROADCAST COMPOSER'),
-
             // 4-Step Progress Indicator
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
@@ -565,19 +573,42 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
 
                   if (_currentStep < 3)
                     ElevatedButton.icon(
-                      icon: const Icon(Icons.arrow_forward_rounded, size: 16),
-                      label: const Text('Next Step'),
+                      icon: Icon(
+                        (_currentStep == 0 && _selectedAudienceType == 'Custom' && recipients.length == 1)
+                            ? Icons.send_rounded
+                            : Icons.arrow_forward_rounded,
+                        size: 16,
+                      ),
+                      label: Text(
+                        (_currentStep == 0 && _selectedAudienceType == 'Custom' && recipients.length == 1)
+                            ? 'Send to ${recipients.first.name}'
+                            : 'Next Step',
+                      ),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppColors.primarySage,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                       ),
                       onPressed: () {
-                        if (_currentStep == 0 && recipients.isEmpty) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Please select at least one eligible recipient.')),
-                          );
-                          return;
+                        if (_currentStep == 0) {
+                          if (recipients.isEmpty) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Please select at least one eligible recipient.')),
+                            );
+                            return;
+                          }
+                          // Exactly 1 contact in Custom Picked: route directly to compact direct-send composer
+                          if (_selectedAudienceType == 'Custom' && recipients.length == 1) {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (context) => DirectSendScreen(
+                                  repository: widget.repository,
+                                  customer: recipients.first,
+                                ),
+                              ),
+                            );
+                            return;
+                          }
                         }
                         if (_currentStep == 1) {
                           final isProd = widget.repository.settings.isWhatsAppProductionMode;
@@ -822,80 +853,243 @@ class _CampaignWizardScreenState extends State<CampaignWizardScreen> {
 
         if (_selectedAudienceType == 'Custom') ...[
           const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: isDark ? AppColors.cardDark : Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.borderLight),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Select Customers (${_customCustomerIds.length} picked)',
-                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
-                    ),
-                    TextButton(
-                      onPressed: () {
-                        setState(() {
-                          if (_customCustomerIds.length == repo.eligibleCustomers.length) {
-                            _customCustomerIds.clear();
-                          } else {
-                            _customCustomerIds.addAll(repo.eligibleCustomers.map((c) => c.id));
-                          }
-                        });
-                      },
-                      child: Text(
-                        _customCustomerIds.length == repo.eligibleCustomers.length ? 'Clear All' : 'Select All',
-                      ),
-                    ),
-                  ],
+          Builder(
+            builder: (context) {
+              final eligibleList = repo.eligibleCustomers;
+              final q = _customSearchQuery.trim().toLowerCase();
+              final qDigits = q.replaceAll(RegExp(r'\D'), '');
+
+              final filteredCustomList = q.isEmpty
+                  ? eligibleList
+                  : eligibleList.where((c) {
+                      final nameMatch = c.name.toLowerCase().contains(q);
+                      final cleanPhone = c.phone.replaceAll(RegExp(r'\D'), '');
+                      final phoneMatch = (qDigits.isNotEmpty && cleanPhone.contains(qDigits)) ||
+                          c.phone.toLowerCase().contains(q);
+                      return nameMatch || phoneMatch;
+                    }).toList();
+
+              final singleSelected = _customCustomerIds.length == 1
+                  ? eligibleList.where((c) => c.id == _customCustomerIds.first).firstOrNull
+                  : null;
+
+              return Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: isDark ? AppColors.cardDark : Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: AppColors.borderLight),
                 ),
-                const Divider(),
-                SizedBox(
-                  height: 220,
-                  child: ListView.builder(
-                    itemCount: repo.eligibleCustomers.length,
-                    itemBuilder: (context, index) {
-                      final c = repo.eligibleCustomers[index];
-                      final isChecked = _customCustomerIds.contains(c.id);
-                      return CheckboxListTile(
-                        dense: true,
-                        value: isChecked,
-                        title: Row(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Header with count & bulk selection actions
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Custom Picked (${_customCustomerIds.length} of ${eligibleList.length})',
+                          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13.5),
+                        ),
+                        Row(
                           children: [
-                            Flexible(
-                              child: Text(c.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13), overflow: TextOverflow.ellipsis),
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                visualDensity: VisualDensity.compact,
+                              ),
+                              onPressed: filteredCustomList.isEmpty
+                                  ? null
+                                  : () {
+                                      setState(() {
+                                        _customCustomerIds.addAll(filteredCustomList.map((c) => c.id));
+                                      });
+                                    },
+                              child: Text(
+                                q.isNotEmpty ? 'Select Visible (${filteredCustomList.length})' : 'Select All',
+                                style: const TextStyle(fontSize: 12),
+                              ),
                             ),
-                            const SizedBox(width: 6),
-                            if (c.hasMarketingConsent)
-                              StatusBadge.marketingConsent()
-                            else if (c.hasUtilityConsent)
-                              StatusBadge.utilityConsent()
-                            else
-                              StatusBadge.noConsent(),
+                            if (_customCustomerIds.isNotEmpty) ...[
+                              const SizedBox(width: 4),
+                              TextButton(
+                                style: TextButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  visualDensity: VisualDensity.compact,
+                                  foregroundColor: AppColors.error,
+                                ),
+                                onPressed: () {
+                                  setState(() => _customCustomerIds.clear());
+                                },
+                                child: const Text('Clear', style: TextStyle(fontSize: 12)),
+                              ),
+                            ],
                           ],
                         ),
-                        subtitle: Text(c.phone, style: const TextStyle(fontSize: 12)),
-                        onChanged: (val) {
-                          setState(() {
-                            if (val == true) {
-                              _customCustomerIds.add(c.id);
-                            } else {
-                              _customCustomerIds.remove(c.id);
-                            }
-                          });
-                        },
-                      );
-                    },
-                  ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 8),
+
+                    // Search input field
+                    TextField(
+                      controller: _customSearchController,
+                      onChanged: (val) => setState(() => _customSearchQuery = val),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: 'Search contacts by name or phone...',
+                        hintStyle: const TextStyle(fontSize: 13),
+                        prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                        suffixIcon: _customSearchQuery.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.clear_rounded, size: 18),
+                                onPressed: () {
+                                  _customSearchController.clear();
+                                  setState(() => _customSearchQuery = '');
+                                },
+                              )
+                            : null,
+                        filled: true,
+                        fillColor: isDark ? AppColors.surfaceDark : Colors.grey.shade50,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide(color: AppColors.borderLight),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+                      ),
+                    ),
+
+                    // Single-contact direct send smart banner
+                    if (singleSelected != null) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: AppColors.primarySageContainer,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: AppColors.primarySageDark.withValues(alpha: 0.2)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.person_pin_rounded, color: AppColors.primarySageDark, size: 18),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                '1 contact picked: ${singleSelected.name}',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.primarySageDark,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: AppColors.primarySage,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                visualDensity: VisualDensity.compact,
+                              ),
+                              icon: const Icon(Icons.send_rounded, size: 12),
+                              label: const Text('Send Directly', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                              onPressed: () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (context) => DirectSendScreen(
+                                      repository: widget.repository,
+                                      customer: singleSelected,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+
+                    const Divider(height: 18),
+
+                    // Contact List
+                    if (filteredCustomList.isEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(vertical: 24),
+                        alignment: Alignment.center,
+                        child: Column(
+                          children: [
+                            const Icon(Icons.search_off_rounded, size: 36, color: AppColors.textMuted),
+                            const SizedBox(height: 8),
+                            Text(
+                              'No contacts match "$_customSearchQuery"',
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                            ),
+                            const SizedBox(height: 4),
+                            TextButton(
+                              onPressed: () {
+                                _customSearchController.clear();
+                                setState(() => _customSearchQuery = '');
+                              },
+                              child: const Text('Clear search filter'),
+                            ),
+                          ],
+                        ),
+                      )
+                    else
+                      SizedBox(
+                        height: 240,
+                        child: ListView.builder(
+                          itemCount: filteredCustomList.length,
+                          itemBuilder: (context, index) {
+                            final c = filteredCustomList[index];
+                            final isChecked = _customCustomerIds.contains(c.id);
+                            return CheckboxListTile(
+                              dense: true,
+                              value: isChecked,
+                              activeColor: AppColors.primarySage,
+                              title: Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      c.name,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 13,
+                                        color: isDark ? AppColors.textLight : AppColors.textCharcoal,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  if (c.hasMarketingConsent)
+                                    StatusBadge.marketingConsent()
+                                  else if (c.hasUtilityConsent)
+                                    StatusBadge.utilityConsent()
+                                  else
+                                    StatusBadge.noConsent(),
+                                ],
+                              ),
+                              subtitle: Text(
+                                c.phone,
+                                style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
+                              ),
+                              onChanged: (val) {
+                                setState(() {
+                                  if (val == true) {
+                                    _customCustomerIds.add(c.id);
+                                  } else {
+                                    _customCustomerIds.remove(c.id);
+                                  }
+                                });
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                  ],
                 ),
-              ],
-            ),
+              );
+            },
           ),
         ],
 

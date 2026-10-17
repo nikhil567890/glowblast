@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../core/widgets/primary_button.dart';
 import '../../../data/models/campaign.dart';
@@ -91,7 +90,6 @@ class _CampaignsScreenState extends State<CampaignsScreen> with SingleTickerProv
           body: SafeArea(
             child: Column(
               children: [
-                const DemoRibbon(label: 'PROMOTIONAL CAMPAIGNS • WHATSAPP ONLY'),
                 Expanded(
                   child: TabBarView(
                     controller: _tabController,
@@ -194,14 +192,16 @@ class _CampaignsScreenState extends State<CampaignsScreen> with SingleTickerProv
               ),
               const Divider(height: 20),
 
-              // KPI Row: Sent, Delivered, Read, Failed
+              // Metric Row: Sent, Failed
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  _buildMetric('Sent', '${c.messagesSent}'),
-                  _buildMetric('Delivered', '${c.delivered} (${c.deliveryRate.toStringAsFixed(0)}%)'),
-                  _buildMetric('Read', '${c.read} (${c.readRate.toStringAsFixed(0)}%)'),
-                  _buildMetric('Failed', '${c.failed}', isError: c.failed > 0),
+                  Expanded(
+                    child: _buildMetric('Messages Sent', '${c.messagesSent}'),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _buildMetric('Failed', '${c.failed}', isError: c.failed > 0),
+                  ),
                 ],
               ),
             ],

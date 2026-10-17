@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/constants/app_strings.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../core/widgets/primary_button.dart';
 import '../../../data/models/campaign.dart';
@@ -59,11 +57,6 @@ class _CampaignSuccessScreenState extends State<CampaignSuccessScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            DemoRibbon(
-              label: isReal
-                  ? 'META CLOUD API • LIVE BROADCAST REPORT'
-                  : 'SIMULATED BROADCAST COMPLETED • WHATSAPP ONLY',
-            ),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
@@ -156,37 +149,19 @@ class _CampaignSuccessScreenState extends State<CampaignSuccessScreen> {
                             ),
                             const Divider(height: 18),
                             _buildSummaryRow(
-                              Icons.done_all_rounded,
-                              'Sent (Confirmed)',
+                              Icons.send_rounded,
+                              'Messages Sent',
                               '${widget.campaign.messagesSent}',
                               AppColors.whatsApp,
                             ),
                             const Divider(height: 18),
                             _buildSummaryRow(
-                              Icons.mark_chat_read_rounded,
-                              'Delivered (Webhook)',
-                              '${widget.campaign.delivered}',
-                              AppColors.whatsApp,
+                              Icons.error_outline_rounded,
+                              'Failed',
+                              '${widget.campaign.failed}',
+                              widget.campaign.failed > 0 ? AppColors.error : AppColors.textMuted,
+                              isBold: widget.campaign.failed > 0,
                             ),
-                            if (widget.campaign.read > 0) ...[
-                              const Divider(height: 18),
-                              _buildSummaryRow(
-                                Icons.remove_red_eye_rounded,
-                                'Read by Customer',
-                                '${widget.campaign.read}',
-                                const Color(0xFF34B7F1),
-                              ),
-                            ],
-                            if (widget.campaign.failed > 0) ...[
-                              const Divider(height: 18),
-                              _buildSummaryRow(
-                                Icons.error_outline_rounded,
-                                'Failed / Rejected',
-                                '${widget.campaign.failed}',
-                                AppColors.error,
-                                isBold: true,
-                              ),
-                            ],
                           ] else ...[
                             _buildSummaryRow(
                               Icons.chat_rounded,
@@ -209,34 +184,7 @@ class _CampaignSuccessScreenState extends State<CampaignSuccessScreen> {
 
                     const SizedBox(height: 16),
 
-                    if (!isReal) ...[
-                      // Demo Mode Notice Banner
-                      Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFFF3CD),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: const Color(0xFFFFEEBA)),
-                        ),
-                        child: const Row(
-                          children: [
-                            Icon(Icons.info_outline_rounded, color: Color(0xFF856404), size: 20),
-                            SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                AppStrings.demoPostSendNotice,
-                                style: TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w600,
-                                  color: Color(0xFF856404),
-                                  height: 1.3,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ] else if (widget.campaign.failed > 0) ...[
+                    if (widget.campaign.failed > 0) ...[
                       // Real mode error notice
                       Container(
                         padding: const EdgeInsets.all(14),

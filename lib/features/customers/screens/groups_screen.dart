@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../core/widgets/primary_button.dart';
 import '../../../data/models/group.dart';
@@ -396,7 +395,6 @@ class _GroupsScreenState extends State<GroupsScreen> {
           body: SafeArea(
             child: Column(
               children: [
-                const DemoRibbon(label: 'CUSTOMER SEGMENTS & GROUPS'),
                 Expanded(
                   child: ListView.separated(
                     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../data/models/campaign.dart';
 import '../../../data/models/customer.dart';
 import '../../../data/repositories/app_repository.dart';
@@ -464,13 +463,6 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            DemoRibbon(
-              label: widget.isProduction
-                  ? 'META CLOUD API • LIVE PRODUCTION BROADCAST (+91 95022 59203)'
-                  : (widget.isRealDispatch && widget.messagingMode != 'demo'
-                      ? 'META CLOUD API • REAL WHATSAPP TEST DISPATCH'
-                      : 'DISPATCHING SIMULATION • WHATSAPP ONLY'),
-            ),
             Expanded(
               child: Center(
                 child: SingleChildScrollView(
@@ -590,16 +582,6 @@ class _SendingSimulationScreenState extends State<SendingSimulationScreen> {
                                   ),
                                 ],
                               ),
-                              if (_deliveredCount > 0) ...[
-                                const SizedBox(height: 6),
-                                Align(
-                                  alignment: Alignment.centerRight,
-                                  child: Text(
-                                    'Delivered: $_deliveredCount · Read: $_readCount',
-                                    style: const TextStyle(fontSize: 11.5, color: AppColors.textMuted, fontWeight: FontWeight.w600),
-                                  ),
-                                ),
-                              ],
                             ] else ...[
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,

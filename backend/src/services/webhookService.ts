@@ -2,7 +2,7 @@ import { MetaWebhookEntry } from '../types/whatsapp';
 import { messageStore } from '../store/messageStore';
 import { campaignStore } from '../store/campaignStore';
 import { realtimeService } from './realtimeService';
-import { maskPhone } from '../utils/phone';
+import { maskPhone, normalizeWhatsAppPhone } from '../utils/phone';
 import { consentStore } from '../store/consentStore';
 import { getPool } from '../db/pool';
 
@@ -91,7 +91,7 @@ export class WebhookService {
           }
         }
 
-        // 2. Process incoming customer messages (STOP / UNSUBSCRIBE keywords)
+        // 2. Process incoming customer messages (STOP keywords & Inbound Replies)
         if (val.messages && Array.isArray(val.messages)) {
           for (const msgObj of val.messages) {
             if (!msgObj.id) continue;
@@ -114,6 +114,7 @@ export class WebhookService {
             console.log(`[Webhook] Inbound customer message from ${maskPhone(msgObj.from)}: ${msgObj.id}`);
             const textBody = (msgObj.text?.body || '').trim().toUpperCase();
 
+            // Check for explicit opt-out keywords
             if (['STOP', 'UNSUBSCRIBE', 'OPT OUT', 'OPTOUT'].includes(textBody)) {
               console.log(`[Webhook] Customer ${maskPhone(msgObj.from)} requested opt-out via keyword '${textBody}'`);
               await consentStore.recordOptOut({
@@ -123,6 +124,68 @@ export class WebhookService {
                 reason: `Customer sent keyword ${textBody}`,
                 inboundWebhookId: msgObj.id,
               });
+            } else {
+              // 3. Process genuine inbound customer reply and associate with recent campaign recipient
+              const normalizedSender = normalizeWhatsAppPhone(msgObj.from);
+              if (normalizedSender) {
+                let matchingMsg: { id: string; campaign_id: string; local_customer_id: string; normalized_phone: string } | undefined;
+
+                // Priority 1: Direct reply via Meta context.id
+                const contextMsgId = (msgObj as any).context?.id;
+                if (contextMsgId && typeof contextMsgId === 'string') {
+                  const ctxRes = await pool.query<{ id: string; campaign_id: string; local_customer_id: string; normalized_phone: string }>(
+                    `SELECT id, campaign_id, local_customer_id, normalized_phone
+                     FROM campaign_messages
+                     WHERE provider_message_id = $1
+                     LIMIT 1;`,
+                    [contextMsgId]
+                  );
+                  if (ctxRes.rows.length > 0) {
+                    matchingMsg = ctxRes.rows[0];
+                  }
+                }
+
+                // Priority 2: Inbound within 24 hours of a sent campaign to this recipient
+                if (!matchingMsg) {
+                  const recentRes = await pool.query<{ id: string; campaign_id: string; local_customer_id: string; normalized_phone: string }>(
+                    `SELECT id, campaign_id, local_customer_id, normalized_phone
+                     FROM campaign_messages
+                     WHERE normalized_phone = $1 AND created_at >= NOW() - INTERVAL '24 hours'
+                     ORDER BY created_at DESC
+                     LIMIT 1;`,
+                    [normalizedSender]
+                  );
+                  if (recentRes.rows.length > 0) {
+                    matchingMsg = recentRes.rows[0];
+                  }
+                }
+
+                if (matchingMsg) {
+                  const replyDedupKey = `reply:${msgObj.id}:${matchingMsg.campaign_id}`;
+                  const replyDedup = await pool.query(
+                    `INSERT INTO webhook_events (dedup_key, event_type, provider_message_id, status, payload)
+                     VALUES ($1, 'message', $2, 'replied', $3)
+                     ON CONFLICT (dedup_key) DO NOTHING
+                     RETURNING dedup_key;`,
+                    [replyDedupKey, msgObj.id, JSON.stringify(msgObj)]
+                  );
+
+                  if (replyDedup.rows.length > 0) {
+                    console.log(`[Webhook] Associated verified reply from ${maskPhone(msgObj.from)} to campaign ${matchingMsg.campaign_id}`);
+                    await messageStore.recordReply(matchingMsg.id);
+                    await campaignStore.recalculateAndSaveCampaignStatus(matchingMsg.campaign_id);
+
+                    realtimeService.broadcastMessageStatus({
+                      campaignId: matchingMsg.campaign_id,
+                      phone: matchingMsg.normalized_phone,
+                      status: 'replied' as any,
+                      providerMessageId: msgObj.id,
+                    });
+                  } else {
+                    console.log(`[Webhook] Duplicate reply event ${replyDedupKey} ignored (idempotent)`);
+                  }
+                }
+              }
             }
           }
         }

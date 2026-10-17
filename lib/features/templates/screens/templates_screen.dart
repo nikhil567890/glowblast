@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../data/models/whatsapp_template.dart';
 import '../../../data/repositories/app_repository.dart';
@@ -92,10 +91,6 @@ class _TemplatesScreenState extends State<TemplatesScreen> {
             ? widget.repository.settings.businessName
             : 'Our Spa & Wellness';
 
-        final activeModeLabel = widget.repository.settings.isWhatsAppProductionMode
-            ? 'PRODUCTION MODE ACTIVE (+91 95022 59203)'
-            : 'WHATSAPP CLOUD API • APPROVED TEMPLATE MANAGEMENT SYSTEM';
-
         return Scaffold(
           appBar: AppBar(
             title: const Text('WhatsApp Templates'),
@@ -129,10 +124,6 @@ class _TemplatesScreenState extends State<TemplatesScreen> {
           body: SafeArea(
             child: Column(
               children: [
-                DemoRibbon(
-                  label: activeModeLabel,
-                ),
-
                 // Mode and Approval Filter chips
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -140,7 +131,7 @@ class _TemplatesScreenState extends State<TemplatesScreen> {
                     scrollDirection: Axis.horizontal,
                     child: Row(
                       children: [
-                        _buildFilterChip('Active Mode (${sourceTemplates.length})', 'All', isDark),
+                        _buildFilterChip('All (${sourceTemplates.length})', 'All', isDark),
                         const SizedBox(width: 8),
                         _buildFilterChip(
                           'Approved ($approvedCount)',

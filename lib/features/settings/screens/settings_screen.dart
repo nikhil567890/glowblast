@@ -2,14 +2,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/api_constants.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../data/repositories/app_repository.dart';
 import '../../../services/excel_service.dart';
 import '../../../services/glowblast_backend_client.dart';
 import '../../auth/screens/landing_screen.dart';
 import 'opt_out_screen.dart';
-import 'buy_credits_screen.dart';
+import 'recharge_meta_balance_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final AppRepository repository;
@@ -282,52 +281,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  void _confirmResetDemo() {
-    showDialog(
-      context: context,
-      builder: (dialogCtx) => AlertDialog(
-        title: const Text('Reset Demo Data?'),
-        content: const Text(
-          'This will restore demo customers, sample campaigns, and WhatsApp credits.\n\nWould you also like to clear your business profile?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogCtx),
-            child: const Text('Cancel'),
-          ),
-          OutlinedButton(
-            onPressed: () async {
-              Navigator.pop(dialogCtx);
-              await widget.repository.resetDemoData(clearProfile: false);
-              if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('✓ Demo data reset (profile kept).')),
-              );
-            },
-            child: const Text('Keep Profile'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.error,
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () async {
-              Navigator.pop(dialogCtx);
-              await widget.repository.resetDemoData(clearProfile: true);
-              if (!mounted) return;
-              Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(
-                  builder: (context) => LandingScreen(repository: widget.repository),
-                ),
-                (route) => false,
-              );
-            },
-            child: const Text('Clear Profile & Reset'),
-          ),
-        ],
-      ),
-    );
-  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -348,7 +302,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           body: SafeArea(
             child: Column(
               children: [
-                const DemoRibbon(label: 'SETTINGS & LOCAL DEMO PREFERENCES'),
                 Expanded(
                   child: ListView(
                     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
@@ -463,33 +416,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                   decoration: BoxDecoration(
-                                    color: settings.isWhatsAppTestMode
-                                        ? (_isBackendOnline == true ? const Color(0xFFE8F5E9) : const Color(0xFFFFEBEE))
-                                        : const Color(0xFFE8F5E9),
+                                    color: _isBackendOnline == true ? const Color(0xFFE8F5E9) : const Color(0xFFFFEBEE),
                                     borderRadius: BorderRadius.circular(20),
                                   ),
                                   child: Row(
                                     children: [
                                       Icon(
-                                        settings.isWhatsAppTestMode
-                                            ? (_isBackendOnline == true ? Icons.cloud_done_rounded : Icons.cloud_off_rounded)
-                                            : Icons.check_circle_rounded,
+                                        _isBackendOnline == true ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
                                         size: 12,
-                                        color: settings.isWhatsAppTestMode
-                                            ? (_isBackendOnline == true ? AppColors.success : AppColors.error)
-                                            : AppColors.success,
+                                        color: _isBackendOnline == true ? AppColors.success : AppColors.error,
                                       ),
                                       const SizedBox(width: 4),
                                       Text(
-                                        settings.isWhatsAppTestMode
-                                            ? (_isBackendOnline == true ? 'Backend Online' : 'Backend Offline')
-                                            : 'Demo Mode',
+                                        _isCheckingBackend
+                                            ? 'Checking...'
+                                            : (_isBackendOnline == true ? 'Connected' : 'Offline'),
                                         style: TextStyle(
                                           fontSize: 10.5,
                                           fontWeight: FontWeight.w700,
-                                          color: settings.isWhatsAppTestMode
-                                              ? (_isBackendOnline == true ? AppColors.success : AppColors.error)
-                                              : AppColors.success,
+                                          color: _isBackendOnline == true ? AppColors.success : AppColors.error,
                                         ),
                                       ),
                                     ],
@@ -499,295 +444,160 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                             const SizedBox(height: 14),
 
-                            // Messaging Mode Selector (Demo vs Developer Test vs Live Production)
-                            const Text('Messaging Mode', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5)),
-                            const SizedBox(height: 8),
-                            SegmentedButton<String>(
-                              segments: const [
-                                ButtonSegment(
-                                  value: 'demo',
-                                  label: Text('Demo'),
-                                  icon: Icon(Icons.speed_rounded, size: 16),
-                                ),
-                                ButtonSegment(
-                                  value: 'testMode',
-                                  label: Text('Dev Test'),
-                                  icon: Icon(Icons.science_rounded, size: 16),
-                                ),
-                                ButtonSegment(
-                                  value: 'production',
-                                  label: Text('Live Prod'),
-                                  icon: Icon(Icons.verified_rounded, size: 16),
-                                ),
-                              ],
-                              selected: {settings.messagingMode},
-                              onSelectionChanged: (set) async {
-                                final updated = settings.copyWith(messagingMode: set.first);
-                                await widget.repository.updateSettings(updated);
-                                if (set.first != 'demo') {
-                                  _checkBackendStatus();
-                                  final effectiveMode = set.first == 'production' ? 'production' : 'test';
-                                  widget.repository.fetchTemplatesFromBackend(mode: effectiveMode);
-                                }
-                              },
-                            ),
-
-                            const SizedBox(height: 12),
-
-                            if (settings.isWhatsAppProductionMode) ...[
-                              Container(
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(
-                                  color: isDark
-                                      ? AppColors.surfaceDark
-                                      : (_isBackendOnline == true
-                                          ? const Color(0xFFE8F5E9)
-                                          : const Color(0xFFFFEBEE)),
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(
-                                    color: _isBackendOnline == true
-                                        ? const Color(0xFF81C784)
-                                        : const Color(0xFFFFCDD2),
-                                    width: 1.2,
-                                  ),
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        const Icon(
-                                          Icons.verified_user_rounded,
-                                          size: 16,
-                                          color: AppColors.success,
-                                        ),
-                                        const SizedBox(width: 6),
-                                        Expanded(
-                                          child: Text(
-                                            _isCheckingBackend
-                                                ? 'Checking production backend...'
-                                                : (_isBackendOnline == true
-                                                    ? 'Live Production • Official Meta Cloud API'
-                                                    : 'Backend Offline • Unable to reach server'),
-                                            style: TextStyle(
-                                              fontSize: 12.5,
-                                              fontWeight: FontWeight.w700,
-                                              color: _isBackendOnline == true ? AppColors.success : AppColors.error,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 6),
-                                    const Text(
-                                      'Production Number: +91 95022 59203 (GlowBlast Official)\n'
-                                      'Rolling 24H Limit: 200 unique recipients across all campaigns\n'
-                                      'Safety Guard: Protected by server kill-switch & email authorization.\n'
-                                      'Consent Rule: Requires recorded WhatsApp opt-in before sending.',
-                                      style: TextStyle(fontSize: 11.5, height: 1.4, color: AppColors.textMuted),
-                                    ),
-                                    const Divider(height: 16),
-                                    Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        Expanded(
-                                          child: Text(
-                                            'Backend: ${settings.backendUrl}',
-                                            style: const TextStyle(fontSize: 11.5, fontFamily: 'monospace'),
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        ),
-                                        IconButton(
-                                          icon: _isCheckingBackend
-                                              ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                                              : const Icon(Icons.refresh_rounded, size: 18),
-                                          onPressed: _checkBackendStatus,
-                                          tooltip: 'Ping Backend Health',
-                                        ),
-                                        TextButton(
-                                          onPressed: _editBackendUrl,
-                                          child: const Text('Change URL', style: TextStyle(fontSize: 12)),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
+                            Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: isDark ? AppColors.surfaceDark : const Color(0xFFF9FAF9),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: AppColors.borderLight),
                               ),
-                            ] else if (settings.isWhatsAppTestMode) ...[
-                              Container(
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(
-                                  color: isDark
-                                      ? AppColors.surfaceDark
-                                      : (_isBackendOnline == true
-                                          ? const Color(0xFFE8F5E9)
-                                          : const Color(0xFFFFEBEE)),
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(
-                                    color: _isBackendOnline == true
-                                        ? const Color(0xFFC8E6C9)
-                                        : const Color(0xFFFFCDD2),
-                                  ),
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        Icon(
-                                          _isBackendOnline == true
-                                              ? Icons.cloud_done_rounded
-                                              : Icons.cloud_off_rounded,
-                                          size: 16,
-                                          color: _isBackendOnline == true ? AppColors.success : AppColors.error,
-                                        ),
-                                        const SizedBox(width: 6),
-                                        Expanded(
-                                          child: Text(
-                                            _isCheckingBackend
-                                                ? 'Checking backend connection...'
-                                                : (_isBackendOnline == true
-                                                    ? 'Backend Online · Sandbox Active'
-                                                    : 'Backend Offline · Unable to reach server'),
-                                            style: TextStyle(
-                                              fontSize: 12.5,
-                                              fontWeight: FontWeight.w700,
-                                              color: _isBackendOnline == true ? AppColors.success : AppColors.error,
-                                            ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      const Icon(Icons.verified_user_rounded, size: 16, color: AppColors.success),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          _isCheckingBackend
+                                              ? 'Connecting to secure server...'
+                                              : (_isBackendOnline == true
+                                                  ? 'Meta Cloud API • Spa Connection Active'
+                                                  : 'Server Unreachable • Please check network'),
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w700,
+                                            color: _isBackendOnline == true ? AppColors.success : AppColors.error,
                                           ),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 6),
-                                    const Text(
-                                      'Test Display Number: +1 (555) 632-5494\nRecipient Limit: Up to 5 authorized Meta test numbers\nAccess Token: Kept secret on cloud backend server only.',
-                                      style: TextStyle(fontSize: 11.5, height: 1.4, color: AppColors.textMuted),
-                                    ),
-                                    const Divider(height: 16),
-                                    Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        Expanded(
-                                          child: Text(
-                                            'Backend: ${settings.backendUrl}',
-                                            style: const TextStyle(fontSize: 11.5, fontFamily: 'monospace'),
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        ),
-                                        IconButton(
-                                          icon: _isCheckingBackend
-                                              ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                                              : const Icon(Icons.refresh_rounded, size: 18),
-                                          onPressed: _checkBackendStatus,
-                                          tooltip: 'Ping Backend Health',
-                                        ),
-                                        TextButton(
-                                          onPressed: _editBackendUrl,
-                                          child: const Text('Change URL', style: TextStyle(fontSize: 12)),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 10),
-                                    // Connection diagnostics toggle & panel
-                                    InkWell(
-                                      onTap: () => setState(() => _showDiagnostics = !_showDiagnostics),
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(vertical: 4),
-                                        child: Row(
-                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                          children: [
-                                            Text(
-                                              _showDiagnostics ? 'Hide Diagnostics ▲' : 'Connection Diagnostics ▼',
-                                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.primarySage),
-                                            ),
-                                            Text(
-                                              _lastHealthStatus != null
-                                                  ? '${_lastHealthStatus!.statusCode ?? "ERR"} · ${_lastHealthStatus!.latency?.inMilliseconds ?? 0}ms'
-                                                  : 'Tap to inspect',
-                                              style: const TextStyle(fontSize: 10.5, color: AppColors.textMuted),
-                                            ),
-                                          ],
                                         ),
                                       ),
-                                    ),
-                                    if (_showDiagnostics) ...[
-                                      Container(
-                                        margin: const EdgeInsets.only(top: 6),
-                                        padding: const EdgeInsets.all(8),
-                                        decoration: BoxDecoration(
-                                          color: isDark ? AppColors.cardDark : Colors.white,
-                                          borderRadius: BorderRadius.circular(6),
-                                          border: Border.all(color: AppColors.borderLight),
-                                        ),
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text('Base URL: ${settings.backendUrl}', style: const TextStyle(fontSize: 10.5, fontFamily: 'monospace')),
-                                            Text('Health Check: ${settings.backendUrl}/health', style: const TextStyle(fontSize: 10.5, fontFamily: 'monospace')),
-                                            Text('Connection State: ${_isBackendOnline == true ? "🟢 Online" : "🔴 Offline"}', style: const TextStyle(fontSize: 10.5)),
-                                            Text('HTTP Status: ${_lastHealthStatus?.statusCode != null ? "${_lastHealthStatus!.statusCode} OK" : "N/A"}', style: const TextStyle(fontSize: 10.5)),
-                                            Text('Latency: ${_lastHealthStatus?.latency != null ? "${_lastHealthStatus!.latency!.inMilliseconds} ms" : "N/A"}', style: const TextStyle(fontSize: 10.5)),
-                                            Text('Last Checked: ${_lastHealthStatus != null ? "${_lastHealthStatus!.checkedAt.hour.toString().padLeft(2, '0')}:${_lastHealthStatus!.checkedAt.minute.toString().padLeft(2, '0')}:${_lastHealthStatus!.checkedAt.second.toString().padLeft(2, '0')}" : "Not checked yet"}', style: const TextStyle(fontSize: 10.5)),
-                                            if (_lastHealthStatus?.error != null)
-                                              Padding(
-                                                padding: const EdgeInsets.only(top: 2),
-                                                child: Text('Error: ${_lastHealthStatus!.error}', style: const TextStyle(fontSize: 10.5, color: AppColors.error)),
-                                              ),
-                                          ],
-                                        ),
+                                      IconButton(
+                                        icon: _isCheckingBackend
+                                            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                                            : const Icon(Icons.refresh_rounded, size: 18),
+                                        onPressed: _checkBackendStatus,
+                                        tooltip: 'Ping Server Health',
                                       ),
                                     ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  const Text(
+                                    'Official WhatsApp Business Account connection for promotional broadcasts and transactional messages.\n'
+                                    '• Requires explicit customer consent before sending.\n'
+                                    '• Unsubscribes and opt-outs are enforced automatically.',
+                                    style: TextStyle(fontSize: 11.5, height: 1.4, color: AppColors.textMuted),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  // Collapsible Administrator Diagnostics
+                                  InkWell(
+                                    onTap: () => setState(() => _showDiagnostics = !_showDiagnostics),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 4),
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Text(
+                                            _showDiagnostics ? 'Hide Administrator Diagnostics ▲' : 'Administrator Diagnostics ▼',
+                                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.primarySage),
+                                          ),
+                                          Text(
+                                            _lastHealthStatus != null
+                                                ? '${_lastHealthStatus!.statusCode ?? "ERR"} · ${_lastHealthStatus!.latency?.inMilliseconds ?? 0}ms'
+                                                : 'Tap to check',
+                                            style: const TextStyle(fontSize: 10.5, color: AppColors.textMuted),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  if (_showDiagnostics) ...[
+                                    Container(
+                                      margin: const EdgeInsets.only(top: 8),
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: isDark ? AppColors.cardDark : Colors.white,
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: AppColors.borderLight),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text('Connection: ${_isBackendOnline == true ? "🟢 Online" : "🔴 Offline"}', style: const TextStyle(fontSize: 11)),
+                                          Text('Status: ${_lastHealthStatus?.statusCode != null ? "${_lastHealthStatus!.statusCode} OK" : "N/A"}', style: const TextStyle(fontSize: 11)),
+                                          Text('Latency: ${_lastHealthStatus?.latency != null ? "${_lastHealthStatus!.latency!.inMilliseconds} ms" : "N/A"}', style: const TextStyle(fontSize: 11)),
+                                          if (_lastHealthStatus?.error != null)
+                                            Padding(
+                                              padding: const EdgeInsets.only(top: 2),
+                                              child: Text('Error: ${_lastHealthStatus!.error}', style: const TextStyle(fontSize: 11, color: AppColors.error)),
+                                            ),
+                                          const SizedBox(height: 6),
+                                          Row(
+                                            mainAxisAlignment: MainAxisAlignment.end,
+                                            children: [
+                                              TextButton.icon(
+                                                style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
+                                                icon: const Icon(Icons.settings_ethernet_rounded, size: 14),
+                                                label: const Text('Configure Server URL', style: TextStyle(fontSize: 11)),
+                                                onPressed: _editBackendUrl,
+                                              ),
+                                            ],
+                                          ),
+                                        ],
+                                      ),
+                                    ),
                                   ],
-                                ),
+                                ],
                               ),
-                            ] else ...[
-                              Text(
-                                'Simulated messaging. No real WhatsApp messages are sent.',
-                                style: TextStyle(fontSize: 12, color: isDark ? AppColors.textMutedDark : AppColors.textMuted),
-                              ),
-                            ],
+                            ),
 
                             const Divider(height: 24),
 
-                            // Credits balance row
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const Text(
-                                      'Available Broadcast Balance',
-                                      style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+                            // Meta messaging balance & recharge row
+                            Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: isDark ? AppColors.surfaceDark : AppColors.warmCream,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  const Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Meta Messaging Balance',
+                                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                                        ),
+                                        SizedBox(height: 2),
+                                        Text(
+                                          'Managed via Meta Business Suite',
+                                          style: TextStyle(fontSize: 11.5, color: AppColors.textMuted),
+                                        ),
+                                      ],
                                     ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      '${settings.whatsAppCredits} Credits',
-                                      style: const TextStyle(
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.w800,
-                                        color: AppColors.primarySage,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                ElevatedButton.icon(
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: AppColors.primarySage,
-                                    foregroundColor: Colors.white,
-                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                                   ),
-                                  icon: const Icon(Icons.add_rounded, size: 16),
-                                  label: const Text('Top Up'),
-                                  onPressed: () {
-                                    Navigator.of(context).push(
-                                      MaterialPageRoute(
-                                        builder: (context) => BuyCreditsScreen(repository: widget.repository),
-                                      ),
-                                    );
-                                  },
-                                ),
-                              ],
+                                  ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: AppColors.primarySage,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    ),
+                                    icon: const Icon(Icons.open_in_new_rounded, size: 15),
+                                    label: const Text('Recharge Balance', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+                                    onPressed: () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute(
+                                          builder: (context) => RechargeMetaBalanceScreen(repository: widget.repository),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ),
                             ),
                           ],
                         ),
@@ -848,21 +658,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                           ],
                         ),
-                      ),
-
-                      const SizedBox(height: 24),
-
-                      // Reset Demo Data Button
-                      OutlinedButton.icon(
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.error,
-                          side: const BorderSide(color: AppColors.error),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                        icon: const Icon(Icons.restore_rounded),
-                        label: const Text('Reset Demo Data', style: TextStyle(fontWeight: FontWeight.w700)),
-                        onPressed: _confirmResetDemo,
                       ),
 
                       const SizedBox(height: 32),

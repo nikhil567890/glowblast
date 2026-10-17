@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../core/widgets/status_badge.dart';
 import '../../../data/repositories/app_repository.dart';
@@ -107,8 +106,6 @@ class _OptOutScreenState extends State<OptOutScreen> {
           body: SafeArea(
             child: Column(
               children: [
-                const DemoRibbon(label: 'COMPLIANCE & CONSENT • 12 EXCLUDED CLIENTS'),
-
                 // Search field
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),

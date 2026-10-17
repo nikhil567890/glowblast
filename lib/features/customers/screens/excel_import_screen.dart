@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/primary_button.dart';
 import '../../../data/repositories/app_repository.dart';
 import '../../../services/excel_service.dart';
@@ -178,7 +177,6 @@ class _ExcelImportScreenState extends State<ExcelImportScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            const DemoRibbon(label: 'EXCEL CUSTOMER PARSER & IMPORTER'),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),

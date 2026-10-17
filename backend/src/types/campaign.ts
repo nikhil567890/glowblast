@@ -52,6 +52,7 @@ export interface CampaignSummary {
   sent: number;
   delivered: number;
   read: number;
+  replied?: number;
   failed: number;
   excludedOptOut: number;
   createdAt: string;

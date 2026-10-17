@@ -144,7 +144,7 @@ class LandingScreen extends StatelessWidget {
                               Icons.insights_rounded,
                               AppColors.accentGold,
                               '6-Month Campaign Analytics',
-                              'Dynamic tracking for delivered, read, and replies.',
+                              'Clear analytics for sent and failed broadcasts.',
                               isDark,
                             ),
                           ],

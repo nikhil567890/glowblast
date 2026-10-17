@@ -961,4 +961,66 @@ class GlowBlastBackendClient {
       };
     }
   }
+
+  /// Safely deletes multiple customer records from backend while strictly preserving
+  /// consent status, opt-out records, compliance audit trail, and campaign history.
+  Future<Map<String, dynamic>> bulkDeleteCustomers({
+    required List<String> customerIds,
+    String? token,
+  }) async {
+    final effectiveToken = token ?? authToken;
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
+        'Authorization': 'Bearer ${effectiveToken.trim()}',
+    };
+
+    try {
+      http.Response response = await _httpClient
+          .delete(
+            _uri('/api/customers'),
+            headers: headers,
+            body: jsonEncode({'customerIds': customerIds}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      // Resilient fallback: If HTTP DELETE route is rejected (e.g. 404/405 or stripped body by middleboxes), retry with POST
+      if (response.statusCode == 404 || response.statusCode == 405) {
+        try {
+          final fallbackResponse = await _httpClient
+              .post(
+                _uri('/api/customers/bulk-delete'),
+                headers: headers,
+                body: jsonEncode({'customerIds': customerIds}),
+              )
+              .timeout(const Duration(seconds: 15));
+          if (fallbackResponse.statusCode < 400 || fallbackResponse.statusCode != 404) {
+            response = fallbackResponse;
+          }
+        } catch (_) {}
+      }
+
+      Map<String, dynamic> data = {};
+      try {
+        data = jsonDecode(response.body) as Map<String, dynamic>;
+      } catch (_) {}
+
+      final isSuccess = response.statusCode >= 200 && response.statusCode < 300 && data['success'] == true;
+      return {
+        'success': isSuccess,
+        'statusCode': response.statusCode,
+        'deletedCount': data['deletedCount'] ?? 0,
+        'deletedCustomerIds': (data['deletedCustomerIds'] as List?)?.cast<String>() ?? <String>[],
+        ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {
+          'code': 'NETWORK_ERROR',
+          'message': 'Failed to delete customers: $e',
+        },
+      };
+    }
+  }
 }

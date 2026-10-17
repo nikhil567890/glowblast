@@ -15,7 +15,7 @@ void main() async {
   ]);
 
   final repository = AppRepository();
-  await repository.init();
+  await repository.init(isProduction: true);
 
   runApp(GlowBlastApp(repository: repository));
 }

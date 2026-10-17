@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../../../core/constants/app_colors.dart';
-import '../../../core/constants/app_strings.dart';
-import '../../../core/widgets/demo_ribbon.dart';
 import '../../../core/widgets/app_card.dart';
 import '../../../data/models/campaign.dart';
 import '../../../data/repositories/app_repository.dart';
@@ -32,7 +30,6 @@ class ReportsScreen extends StatelessWidget {
           body: SafeArea(
             child: Column(
               children: [
-                const DemoRibbon(label: AppStrings.demoAnalyticsLabel),
                 Expanded(
                   child: SingleChildScrollView(
                     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
@@ -126,17 +123,19 @@ class ReportsScreen extends StatelessWidget {
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
-                                  'Delivered to ${bestCampaign.recipients} recipients with ${bestCampaign.readRate.toStringAsFixed(0)}% read rate.',
+                                  'Dispatched to ${bestCampaign.recipients} recipients via Meta WhatsApp Cloud API.',
                                   style: const TextStyle(fontSize: 12.5, color: Colors.white70),
                                 ),
                                 const SizedBox(height: 16),
                                 Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                   children: [
-                                    _buildHighlightStat('Sent', '${bestCampaign.messagesSent}'),
-                                    _buildHighlightStat('Delivered', '${bestCampaign.delivered}'),
-                                    _buildHighlightStat('Read Rate', '${bestCampaign.readRate.toStringAsFixed(0)}%'),
-                                    _buildHighlightStat('Replied', '${bestCampaign.replied}'),
+                                    Expanded(
+                                      child: _buildHighlightStat('Messages Sent', '${bestCampaign.messagesSent}'),
+                                    ),
+                                    const SizedBox(width: 16),
+                                    Expanded(
+                                      child: _buildHighlightStat('Failed', '${bestCampaign.failed}'),
+                                    ),
                                   ],
                                 ),
                               ],
@@ -179,7 +178,7 @@ class ReportsScreen extends StatelessWidget {
                               ),
                               const SizedBox(height: 16),
 
-                              // Grid of 4 key stats (EXACTLY equal width & height via IntrinsicHeight and unified layout)
+                              // 2 key stats: Total Sent and Total Failed (EXACTLY equal width & height)
                               IntrinsicHeight(
                                 child: Row(
                                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -197,41 +196,12 @@ class ReportsScreen extends StatelessWidget {
                                     const SizedBox(width: 10),
                                     Expanded(
                                       child: _buildMetricTile(
-                                        'Delivered',
-                                        '${repository.totalDelivered}',
-                                        Icons.done_all_rounded,
-                                        AppColors.whatsApp,
+                                        'Total Failed',
+                                        '${repository.totalFailed}',
+                                        Icons.error_outline_rounded,
+                                        AppColors.error,
                                         isDark,
-                                        sub: '${repository.overallDeliveryRate.toStringAsFixed(1)}% delivery',
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                              IntrinsicHeight(
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                                  children: [
-                                    Expanded(
-                                      child: _buildMetricTile(
-                                        'Read',
-                                        '${repository.totalRead}',
-                                        Icons.mark_chat_read_rounded,
-                                        AppColors.info,
-                                        isDark,
-                                        sub: '${repository.overallReadRate.toStringAsFixed(1)}% read rate',
-                                      ),
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: _buildMetricTile(
-                                        'Replied',
-                                        '${repository.totalReplied}',
-                                        Icons.reply_rounded,
-                                        AppColors.accentGold,
-                                        isDark,
-                                        sub: 'Client replies',
+                                        sub: repository.totalFailed > 0 ? 'Requires attention' : 'All broadcasts successful',
                                       ),
                                     ),
                                   ],
@@ -259,10 +229,6 @@ class ReportsScreen extends StatelessWidget {
                                 fontWeight: FontWeight.w700,
                                 color: isDark ? AppColors.textLight : AppColors.textCharcoal,
                               ),
-                            ),
-                            const Text(
-                              AppStrings.demoAnalyticsLabel,
-                              style: TextStyle(fontSize: 11, color: AppColors.textMuted),
                             ),
                           ],
                         ),
@@ -345,24 +311,18 @@ class ReportsScreen extends StatelessWidget {
                                   ),
                                   const Divider(height: 20),
 
-                                  // Grid metrics: Sent, Delivered, Read, Replied, Failed
+                                  // Metrics: Sent and Failed
                                   Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                     children: [
-                                      _buildReportItem('Sent', '${camp.messagesSent}'),
-                                      _buildReportItem('Delivered', '${camp.delivered} (${camp.deliveryRate.toStringAsFixed(0)}%)'),
-                                      _buildReportItem('Read', '${camp.read} (${camp.readRate.toStringAsFixed(0)}%)'),
-                                      _buildReportItem('Replied', camp.isRealTest ? 'N/A*' : '${camp.replied}'),
-                                      _buildReportItem('Failed', '${camp.failed}', isFailed: camp.failed > 0),
+                                      Expanded(
+                                        child: _buildReportItem('Messages Sent', '${camp.messagesSent}'),
+                                      ),
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        child: _buildReportItem('Failed', '${camp.failed}', isFailed: camp.failed > 0),
+                                      ),
                                     ],
                                   ),
-                                  if (camp.isRealTest) ...[
-                                    const SizedBox(height: 6),
-                                    const Text(
-                                      '* Inbound customer replies are not available in current test integration.',
-                                      style: TextStyle(fontSize: 10.5, fontStyle: FontStyle.italic, color: AppColors.textMuted),
-                                    ),
-                                  ],
                                 ],
                               ),
                             ),
@@ -476,55 +436,20 @@ class ReportsScreen extends StatelessWidget {
       }).toList();
 
       int sent = matches.fold(0, (sum, c) => sum + c.messagesSent);
-      int delivered = matches.fold(0, (sum, c) => sum + c.delivered);
-      bool isDemo = false;
-
-      if (matches.isEmpty) {
-        // Fallback to demo profile dataset for months before active installation
-        final demoCamp = campaigns.firstWhere(
-          (c) => c.month.toLowerCase().startsWith(monthStr.toLowerCase()),
-          orElse: () => Campaign(
-            id: '',
-            name: '',
-            month: monthStr,
-            date: DateTime(targetYear, targetMonth, 1),
-            targetAudience: 'All Clients',
-            messageContent: '',
-            recipients: 0,
-            messagesSent: 0,
-            delivered: 0,
-            read: 0,
-            replied: 0,
-            failed: 0,
-          ),
-        );
-        if (demoCamp.messagesSent > 0) {
-          sent = demoCamp.messagesSent;
-          delivered = demoCamp.delivered;
-          isDemo = !demoCamp.isRealTest;
-        } else {
-          const sampleSent = [110, 135, 125, 150, 180, 205];
-          const sampleDel = [102, 128, 118, 142, 172, 196];
-          final sIdx = (5 - i).clamp(0, 5);
-          sent = sampleSent[sIdx];
-          delivered = sampleDel[sIdx];
-          isDemo = true;
-        }
-      }
+      int failed = matches.fold(0, (sum, c) => sum + c.failed);
 
       monthlyData.add({
         'month': monthStr,
         'year': targetYear,
         'sent': sent,
-        'delivered': delivered,
-        'isDemo': isDemo,
+        'failed': failed,
       });
     }
 
     final maxVal = monthlyData
         .map((m) => (m['sent'] as int))
-        .fold(100, (a, b) => a > b ? a : b);
-    final chartMaxY = (maxVal * 1.25).toDouble().clamp(120.0, 500.0);
+        .fold(0, (a, b) => a > b ? a : b);
+    final chartMaxY = (maxVal > 0 ? (maxVal * 1.35) : 10.0).toDouble();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -556,7 +481,7 @@ class ReportsScreen extends StatelessWidget {
               children: [
                 _buildLegendItem('Sent', AppColors.primarySageLight),
                 const SizedBox(width: 8),
-                _buildLegendItem('Delivered', AppColors.whatsApp),
+                _buildLegendItem('Failed', AppColors.error),
               ],
             ),
           ],
@@ -576,7 +501,7 @@ class ReportsScreen extends StatelessWidget {
                   getTooltipItem: (group, groupIndex, rod, rodIndex) {
                     final item = monthlyData[group.x.toInt()];
                     return BarTooltipItem(
-                      '${item['month']} ${item['year']}\nSent: ${item['sent']}\nDelivered: ${item['delivered']}',
+                      '${item['month']} ${item['year']}\nSent: ${item['sent']}\nFailed: ${item['failed']}',
                       const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
                     );
                   },
@@ -625,8 +550,8 @@ class ReportsScreen extends StatelessWidget {
                       borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
                     ),
                     BarChartRodData(
-                      toY: (item['delivered'] as int).toDouble(),
-                      color: AppColors.whatsApp,
+                      toY: (item['failed'] as int).toDouble(),
+                      color: AppColors.error,
                       width: 9,
                       borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
                     ),

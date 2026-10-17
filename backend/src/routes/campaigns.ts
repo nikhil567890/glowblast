@@ -15,124 +15,145 @@ const router = Router();
  * Requires JWT authentication via Authorization: Bearer <JWT>
  */
 router.post('/send', async (req: Request, res: Response) => {
-  // 1. Verify JWT Authentication
-  const authHeader = req.headers.authorization;
-  const authHeaderPresent = !!(authHeader && authHeader.startsWith('Bearer '));
-  let authValid = false;
-  let userId = 'unauthenticated';
-  let userEmail: string | undefined = undefined;
+  try {
+    // 1. Verify JWT Authentication
+    const authHeader = req.headers.authorization;
+    const authHeaderPresent = !!(authHeader && authHeader.startsWith('Bearer '));
+    let authValid = false;
+    let userId = 'unauthenticated';
+    let userEmail: string | undefined = undefined;
 
-  if (authHeaderPresent && authHeader) {
-    const token = authHeader.substring(7).trim();
-    try {
-      const decoded = jwt.verify(token, env.JWT_SECRET) as { sub?: string; email?: string; id?: string };
-      authValid = true;
-      userId = decoded.sub || decoded.id || decoded.email || 'authenticated_user';
+    if (authHeaderPresent && authHeader) {
+      const token = authHeader.substring(7).trim();
+      try {
+        const decoded = jwt.verify(token, env.JWT_SECRET) as { sub?: string; email?: string; id?: string };
+        authValid = true;
+        userId = decoded.sub || decoded.id || decoded.email || 'authenticated_user';
 
-      // Authoritative email derivation: strictly from verified server-side authentication identity
-      const serverUser = decoded.sub ? await userStore.findById(decoded.sub) : undefined;
-      if (serverUser && serverUser.email) {
-        userEmail = serverUser.email.trim().toLowerCase();
-      } else if (decoded.email && typeof decoded.email === 'string') {
-        userEmail = decoded.email.trim().toLowerCase();
-      } else if (decoded.sub && decoded.sub.includes('@')) {
-        userEmail = decoded.sub.trim().toLowerCase();
+        // Authoritative email derivation: strictly from verified server-side authentication identity
+        try {
+          const serverUser = decoded.sub ? await userStore.findById(decoded.sub) : undefined;
+          if (serverUser && serverUser.email) {
+            userEmail = serverUser.email.trim().toLowerCase();
+          }
+        } catch (dbErr: any) {
+          console.warn(`[Campaign] User lookup warning: ${dbErr?.message || dbErr}`);
+        }
+
+        if (!userEmail) {
+          if (decoded.email && typeof decoded.email === 'string') {
+            userEmail = decoded.email.trim().toLowerCase();
+          } else if (decoded.sub && decoded.sub.includes('@')) {
+            userEmail = decoded.sub.trim().toLowerCase();
+          }
+        }
+      } catch (_) {
+        authValid = false;
       }
-    } catch (_) {
-      authValid = false;
+    }
+
+    // Safe diagnostics (never logs secrets, JWT, tokens, or PII)
+    console.log(`[Campaign] Send request received\nauthHeaderPresent=${authHeaderPresent}\nauthValid=${authValid}\nuserId=${userId}`);
+
+    if (!authHeaderPresent || !authValid) {
+      console.warn(`[Campaign] Rejected:\nreason=UNAUTHORIZED`);
+      res.status(401).json({
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Authentication required',
+        },
+      });
+      return;
+    }
+
+    // 2. Safe Payload Metadata Logging
+    const payloadKeys = req.body && typeof req.body === 'object' ? Object.keys(req.body) : [];
+    const recipientsCount = Array.isArray(req.body?.recipients) ? req.body.recipients.length : 0;
+    const reqTemplateName = typeof req.body?.templateName === 'string' ? req.body.templateName : 'unknown';
+    const reqTemplateLanguage = typeof req.body?.templateLanguage === 'string' ? req.body.templateLanguage : 'en_US';
+    const reqMode = typeof req.body?.mode === 'string' ? req.body.mode : 'test';
+
+    console.log(
+      `[Campaign] Send request received\n` +
+      `payloadKeys=${JSON.stringify(payloadKeys)}\n` +
+      `recipientsCount=${recipientsCount}\n` +
+      `templateName=${reqTemplateName}\n` +
+      `templateLanguage=${reqTemplateLanguage}\n` +
+      `mode=${reqMode}`
+    );
+
+    // 3. Schema Validation
+    const parsed = campaignSendSchema.safeParse(req.body);
+    if (!parsed.success) {
+      const issues = parsed.error.issues;
+      const errorFields = Array.from(new Set(issues.map((i) => i.path.join('.') || 'body')));
+      const firstMessage = issues[0]?.message || 'Invalid campaign payload format';
+
+      console.warn(`[Campaign] Rejected:\nreason=VALIDATION_ERROR\nfields=${JSON.stringify(errorFields)}`);
+      res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: firstMessage !== 'Required' && !firstMessage.startsWith('Expected')
+            ? firstMessage
+            : `Invalid campaign data: ${errorFields.join(', ')}`,
+          fields: errorFields,
+        },
+      });
+      return;
+    }
+
+    // 4. Dispatch Campaign
+    const result = await CampaignService.dispatchCampaign({
+      ...parsed.data,
+      campaignId: parsed.data.campaignId || `GB-${Date.now()}`,
+      clientRequestToken: parsed.data.clientRequestToken || undefined,
+      templateLanguage: parsed.data.templateLanguage || 'en_US',
+      templateComponents: (parsed.data.templateComponents ?? undefined) as any,
+      userEmail,
+      recipients: parsed.data.recipients.map((r, idx) => ({
+        localCustomerId: r.localCustomerId || `cust_${idx + 1}`,
+        name: r.name || 'Valued Customer',
+        phone: r.phone,
+        hasConsent: r.hasConsent ?? false,
+        consentRecordedAt: r.consentRecordedAt || undefined,
+      })),
+    });
+
+    if (!result.success) {
+      const errCode = result.error?.code || 'DISPATCH_ERROR';
+      console.warn(`[Campaign] Rejected:\nreason=${errCode}`);
+      const statusCode = errCode === 'CAMPAIGN_NOT_FOUND' ? 404 : 400;
+      res.status(statusCode).json({
+        success: false,
+        error: {
+          code: errCode,
+          message: result.error?.message || 'Failed to dispatch campaign',
+        },
+      });
+      return;
+    }
+
+    res.status(202).json({
+      success: true,
+      campaignId: result.campaign?.campaignId,
+      status: result.campaign?.status,
+      total: result.campaign?.total,
+      message: 'Campaign accepted for processing',
+    });
+  } catch (err: any) {
+    console.error(`[Campaign] Database or system error in /send:`, err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'DATABASE_ERROR',
+          message: err?.message || 'Database error occurred during campaign dispatch',
+        },
+      });
     }
   }
-
-  // Safe diagnostics (never logs secrets, JWT, tokens, or PII)
-  console.log(`[Campaign] Send request received\nauthHeaderPresent=${authHeaderPresent}\nauthValid=${authValid}\nuserId=${userId}`);
-
-  if (!authHeaderPresent || !authValid) {
-    console.warn(`[Campaign] Rejected:\nreason=UNAUTHORIZED`);
-    res.status(401).json({
-      success: false,
-      error: {
-        code: 'UNAUTHORIZED',
-        message: 'Authentication required',
-      },
-    });
-    return;
-  }
-
-  // 2. Safe Payload Metadata Logging
-  const payloadKeys = req.body && typeof req.body === 'object' ? Object.keys(req.body) : [];
-  const recipientsCount = Array.isArray(req.body?.recipients) ? req.body.recipients.length : 0;
-  const reqTemplateName = typeof req.body?.templateName === 'string' ? req.body.templateName : 'unknown';
-  const reqTemplateLanguage = typeof req.body?.templateLanguage === 'string' ? req.body.templateLanguage : 'en_US';
-  const reqMode = typeof req.body?.mode === 'string' ? req.body.mode : 'test';
-
-  console.log(
-    `[Campaign] Send request received\n` +
-    `payloadKeys=${JSON.stringify(payloadKeys)}\n` +
-    `recipientsCount=${recipientsCount}\n` +
-    `templateName=${reqTemplateName}\n` +
-    `templateLanguage=${reqTemplateLanguage}\n` +
-    `mode=${reqMode}`
-  );
-
-  // 3. Schema Validation
-  const parsed = campaignSendSchema.safeParse(req.body);
-  if (!parsed.success) {
-    const issues = parsed.error.issues;
-    const errorFields = Array.from(new Set(issues.map((i) => i.path.join('.') || 'body')));
-    const firstMessage = issues[0]?.message || 'Invalid campaign payload format';
-
-    console.warn(`[Campaign] Rejected:\nreason=VALIDATION_ERROR\nfields=${JSON.stringify(errorFields)}`);
-    res.status(400).json({
-      success: false,
-      error: {
-        code: 'VALIDATION_ERROR',
-        message: firstMessage !== 'Required' && !firstMessage.startsWith('Expected')
-          ? firstMessage
-          : `Invalid campaign data: ${errorFields.join(', ')}`,
-        fields: errorFields,
-      },
-    });
-    return;
-  }
-
-  // 4. Dispatch Campaign
-  const result = await CampaignService.dispatchCampaign({
-    ...parsed.data,
-    campaignId: parsed.data.campaignId || `GB-${Date.now()}`,
-    clientRequestToken: parsed.data.clientRequestToken || undefined,
-    templateLanguage: parsed.data.templateLanguage || 'en_US',
-    templateComponents: (parsed.data.templateComponents ?? undefined) as any,
-    userEmail,
-    recipients: parsed.data.recipients.map((r, idx) => ({
-      localCustomerId: r.localCustomerId || `cust_${idx + 1}`,
-      name: r.name || 'Valued Customer',
-      phone: r.phone,
-      hasConsent: r.hasConsent ?? false,
-      consentRecordedAt: r.consentRecordedAt || undefined,
-    })),
-  });
-
-  if (!result.success) {
-    const errCode = result.error?.code || 'DISPATCH_ERROR';
-    console.warn(`[Campaign] Rejected:\nreason=${errCode}`);
-    const statusCode = errCode === 'CAMPAIGN_NOT_FOUND' ? 404 : 400;
-    res.status(statusCode).json({
-      success: false,
-      error: {
-        code: errCode,
-        message: result.error?.message || 'Failed to dispatch campaign',
-      },
-    });
-    return;
-  }
-
-  res.status(202).json({
-    success: true,
-    campaignId: result.campaign?.campaignId,
-    status: result.campaign?.status,
-    total: result.campaign?.total,
-    message: 'Campaign accepted for processing',
-  });
 });
 
 /**
@@ -140,28 +161,41 @@ router.post('/send', async (req: Request, res: Response) => {
  * Returns the current authoritative campaign state.
  */
 router.get('/:campaignId', async (req: Request, res: Response) => {
-  const { campaignId } = req.params;
-  const summary = await campaignStore.getSummary(campaignId);
-  const camp = await campaignStore.get(campaignId);
+  try {
+    const { campaignId } = req.params;
+    const summary = await campaignStore.getSummary(campaignId);
+    const camp = await campaignStore.get(campaignId);
 
-  if (!summary || !camp) {
-    res.status(404).json({
-      success: false,
-      error: {
-        code: 'CAMPAIGN_NOT_FOUND',
-        message: `Campaign with ID '${campaignId}' was not found.`,
+    if (!summary || !camp) {
+      res.status(404).json({
+        success: false,
+        error: {
+          code: 'CAMPAIGN_NOT_FOUND',
+          message: `Campaign with ID '${campaignId}' was not found.`,
+        },
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      campaign: {
+        ...summary,
+        messages: camp.messages,
       },
     });
-    return;
+  } catch (err: any) {
+    console.error(`[Campaign] Database error in GET /:campaignId:`, err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'DATABASE_ERROR',
+          message: err?.message || 'Database error occurred while fetching campaign',
+        },
+      });
+    }
   }
-
-  res.json({
-    success: true,
-    campaign: {
-      ...summary,
-      messages: camp.messages,
-    },
-  });
 });
 
 /**
@@ -170,45 +204,70 @@ router.get('/:campaignId', async (req: Request, res: Response) => {
  * Implements canonical schema expected by Flutter client.
  */
 router.get('/:campaignId/status', async (req: Request, res: Response) => {
-  const { campaignId } = req.params;
-  const summary = await campaignStore.getSummary(campaignId);
+  try {
+    const { campaignId } = req.params;
+    const summary = await campaignStore.getSummary(campaignId);
 
-  if (!summary) {
-    res.status(404).json({
-      success: false,
-      error: {
-        code: 'CAMPAIGN_NOT_FOUND',
-        message: `Campaign with ID '${campaignId}' was not found.`,
-      },
+    if (!summary) {
+      res.status(404).json({
+        success: false,
+        error: {
+          code: 'CAMPAIGN_NOT_FOUND',
+          message: `Campaign with ID '${campaignId}' was not found.`,
+        },
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      campaignId: summary.campaignId,
+      campaignName: summary.campaignName,
+      status: summary.status,
+      total: summary.total,
+      queued: summary.queued,
+      accepted: summary.accepted,
+      sent: summary.sent,
+      delivered: summary.delivered,
+      read: summary.read,
+      failed: summary.failed,
+      excludedOptOut: summary.excludedOptOut,
+      campaign: summary,
     });
-    return;
+  } catch (err: any) {
+    console.error(`[Campaign] Database error in GET /:campaignId/status:`, err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'DATABASE_ERROR',
+          message: err?.message || 'Database error occurred while fetching campaign status',
+        },
+      });
+    }
   }
-
-  res.json({
-    success: true,
-    campaignId: summary.campaignId,
-    campaignName: summary.campaignName,
-    status: summary.status,
-    total: summary.total,
-    queued: summary.queued,
-    accepted: summary.accepted,
-    sent: summary.sent,
-    delivered: summary.delivered,
-    read: summary.read,
-    failed: summary.failed,
-    excludedOptOut: summary.excludedOptOut,
-    campaign: summary,
-  });
 });
-
 
 /**
  * GET /api/campaigns/:campaignId/events
  * Real-time SSE stream for live progress and message status updates.
  */
 router.get('/:campaignId/events', (req: Request, res: Response) => {
-  const { campaignId } = req.params;
-  realtimeService.registerClient(campaignId, res);
+  try {
+    const { campaignId } = req.params;
+    realtimeService.registerClient(campaignId, res);
+  } catch (err: any) {
+    console.error(`[Campaign] Error in SSE registration:`, err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'SSE_ERROR',
+          message: 'Failed to establish event stream',
+        },
+      });
+    }
+  }
 });
 
 export default router;

@@ -19,35 +19,58 @@ export class MessageStore {
    */
   public async get(id: string): Promise<StoredMessage | undefined> {
     const pool = getPool();
-    const res = await pool.query<{
-      id: string;
-      campaign_id: string;
-      local_customer_id: string;
-      recipient_name: string;
-      normalized_phone: string;
-      status: string;
-      provider_message_id: string | null;
-      template_name: string | null;
-      template_language: string | null;
-      error_code: number | null;
-      error_title: string | null;
-      error_message: string | null;
-      error_details: string | null;
-      replied_at: Date | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
-      `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
-              provider_message_id, template_name, template_language,
-              error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
-       FROM campaign_messages
-       WHERE id = $1
-       LIMIT 1;`,
-      [id]
-    );
+    let row: any;
 
-    if (res.rows.length === 0) return undefined;
-    return this.mapRowToMessage(res.rows[0]);
+    try {
+      const res = await pool.query<{
+        id: string;
+        campaign_id: string;
+        local_customer_id: string;
+        recipient_name: string;
+        normalized_phone: string;
+        status: string;
+        provider_message_id: string | null;
+        template_name: string | null;
+        template_language: string | null;
+        error_code: number | null;
+        error_title: string | null;
+        error_message: string | null;
+        error_details: string | null;
+        replied_at: Date | null;
+        created_at: Date;
+        updated_at: Date;
+      }>(
+        `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                provider_message_id, template_name, template_language,
+                error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
+         FROM campaign_messages
+         WHERE id = $1
+         LIMIT 1;`,
+        [id]
+      );
+
+      if (res.rows.length === 0) return undefined;
+      row = res.rows[0];
+    } catch (err: any) {
+      if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('replied_at'))) {
+        console.warn(`[MessageStore] 'replied_at' column missing in database. Falling back to legacy query.`);
+        const fallback = await pool.query<any>(
+          `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                  provider_message_id, template_name, template_language,
+                  error_code, error_title, error_message, error_details, NULL AS replied_at, created_at, updated_at
+           FROM campaign_messages
+           WHERE id = $1
+           LIMIT 1;`,
+          [id]
+        );
+        if (fallback.rows.length === 0) return undefined;
+        row = fallback.rows[0];
+      } else {
+        throw err;
+      }
+    }
+
+    return this.mapRowToMessage(row);
   }
 
   /**
@@ -55,18 +78,40 @@ export class MessageStore {
    */
   public async getByProviderId(providerMessageId: string): Promise<StoredMessage | undefined> {
     const pool = getPool();
-    const res = await pool.query(
-      `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
-              provider_message_id, template_name, template_language,
-              error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
-       FROM campaign_messages
-       WHERE provider_message_id = $1
-       LIMIT 1;`,
-      [providerMessageId]
-    );
+    let row: any;
 
-    if (res.rows.length === 0) return undefined;
-    return this.mapRowToMessage(res.rows[0]);
+    try {
+      const res = await pool.query(
+        `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                provider_message_id, template_name, template_language,
+                error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
+         FROM campaign_messages
+         WHERE provider_message_id = $1
+         LIMIT 1;`,
+        [providerMessageId]
+      );
+
+      if (res.rows.length === 0) return undefined;
+      row = res.rows[0];
+    } catch (err: any) {
+      if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('replied_at'))) {
+        const fallback = await pool.query(
+          `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                  provider_message_id, template_name, template_language,
+                  error_code, error_title, error_message, error_details, NULL AS replied_at, created_at, updated_at
+           FROM campaign_messages
+           WHERE provider_message_id = $1
+           LIMIT 1;`,
+          [providerMessageId]
+        );
+        if (fallback.rows.length === 0) return undefined;
+        row = fallback.rows[0];
+      } else {
+        throw err;
+      }
+    }
+
+    return this.mapRowToMessage(row);
   }
 
   /**
@@ -74,17 +119,37 @@ export class MessageStore {
    */
   public async getByCampaignId(campaignId: string): Promise<StoredMessage[]> {
     const pool = getPool();
-    const res = await pool.query(
-      `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
-              provider_message_id, template_name, template_language,
-              error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
-       FROM campaign_messages
-       WHERE campaign_id = $1
-       ORDER BY created_at ASC;`,
-      [campaignId]
-    );
+    let rows: any[];
 
-    return res.rows.map((r) => this.mapRowToMessage(r));
+    try {
+      const res = await pool.query(
+        `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                provider_message_id, template_name, template_language,
+                error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
+         FROM campaign_messages
+         WHERE campaign_id = $1
+         ORDER BY created_at ASC;`,
+        [campaignId]
+      );
+      rows = res.rows;
+    } catch (err: any) {
+      if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('replied_at'))) {
+        const fallback = await pool.query(
+          `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                  provider_message_id, template_name, template_language,
+                  error_code, error_title, error_message, error_details, NULL AS replied_at, created_at, updated_at
+           FROM campaign_messages
+           WHERE campaign_id = $1
+           ORDER BY created_at ASC;`,
+          [campaignId]
+        );
+        rows = fallback.rows;
+      } else {
+        throw err;
+      }
+    }
+
+    return rows.map((r) => this.mapRowToMessage(r));
   }
 
   /**
@@ -250,14 +315,22 @@ export class MessageStore {
    */
   public async recordReply(id: string): Promise<boolean> {
     const pool = getPool();
-    const res = await pool.query(
-      `UPDATE campaign_messages
-       SET replied_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND replied_at IS NULL
-       RETURNING id;`,
-      [id]
-    );
-    return (res.rowCount || 0) > 0;
+    try {
+      const res = await pool.query(
+        `UPDATE campaign_messages
+         SET replied_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND replied_at IS NULL
+         RETURNING id;`,
+        [id]
+      );
+      return (res.rowCount || 0) > 0;
+    } catch (err: any) {
+      if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('replied_at'))) {
+        console.warn(`[MessageStore] 'replied_at' column missing in database. Cannot record reply timestamp.`);
+        return false;
+      }
+      throw err;
+    }
   }
 
   /**

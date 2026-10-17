@@ -20,9 +20,12 @@ export function getMigrationsDir(): string {
   const candidates = [
     path.join(__dirname, 'migrations'),
     path.join(__dirname, '../db/migrations'),
+    path.resolve(__dirname, '../../src/db/migrations'),
+    path.resolve(__dirname, '../../../src/db/migrations'),
     path.join(process.cwd(), 'src/db/migrations'),
     path.join(process.cwd(), 'dist/src/db/migrations'),
     path.join(process.cwd(), 'backend/src/db/migrations'),
+    path.join(process.cwd(), 'backend/dist/src/db/migrations'),
   ];
 
   for (const c of candidates) {

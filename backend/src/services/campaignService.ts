@@ -457,7 +457,32 @@ export class CampaignService {
       } catch (_) {}
     }
 
-    const createdCampaign = await campaignStore.get(effectiveCampaignId);
+    let createdCampaign: StoredCampaign | undefined;
+    try {
+      createdCampaign = await campaignStore.get(effectiveCampaignId);
+    } catch (err: any) {
+      console.error(`[Campaign] Safe fallback: Error retrieving created campaign ${effectiveCampaignId}: ${err.message}`);
+      createdCampaign = {
+        campaignId: effectiveCampaignId,
+        clientRequestToken,
+        campaignName: effectiveCampaignName,
+        status: 'processing',
+        templateName: effectiveMetaTemplateName,
+        templateLanguage: finalTemplateLanguage,
+        total: recipients.length,
+        queued: queuedCount,
+        accepted: 0,
+        sent: 0,
+        delivered: 0,
+        read: 0,
+        replied: 0,
+        failed: 0,
+        excludedOptOut: excludedOptOutCount,
+        messages: storedMessages,
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
 
     // Only the creator that successfully committed the setup initiates background dispatch
     if (isCreator && queuedCount > 0) {
@@ -704,10 +729,14 @@ export class CampaignService {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
-    const finalSummary = await campaignStore.recalculateAndSaveCampaignStatus(campaignId);
-    realtimeService.broadcastCampaignProgress(campaignId);
-    console.log(
-      `[Campaign] Completed dispatch loop for ${campaignId}. Authoritative status: ${finalSummary?.status}`
-    );
+    try {
+      const finalSummary = await campaignStore.recalculateAndSaveCampaignStatus(campaignId);
+      realtimeService.broadcastCampaignProgress(campaignId);
+      console.log(
+        `[Campaign] Completed dispatch loop for ${campaignId}. Authoritative status: ${finalSummary?.status}`
+      );
+    } catch (err: any) {
+      console.error(`[Campaign] Error finalizing campaign status for ${campaignId}: ${err?.message || err}`);
+    }
   }
 }

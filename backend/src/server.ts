@@ -88,6 +88,29 @@ app.use((_req, res) => {
   });
 });
 
+// Global 500 error handler
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(`[Server] Unhandled route error on ${req.method} ${req.path}:`, err?.message || err);
+  if (!res.headersSent) {
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: err?.message || 'An unexpected internal error occurred.',
+      },
+    });
+  }
+});
+
+// Process-level crash prevention guards
+process.on('unhandledRejection', (reason: any) => {
+  console.error('[Process] Unhandled Promise Rejection (process preserved):', reason?.message || reason);
+});
+
+process.on('uncaughtException', (err: Error) => {
+  console.error('[Process] Uncaught Exception (process preserved):', err?.message || err);
+});
+
 // Start server when run directly
 const isTestEnv = process.env.NODE_ENV === 'test' || process.execArgv.includes('--test') || process.argv.some(a => a.includes('test'));
 if (!isTestEnv) {

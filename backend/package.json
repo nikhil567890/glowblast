@@ -4,7 +4,7 @@
   "description": "Secure WhatsApp Cloud API backend for GlowBlast",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copyMigrations.js",
     "start": "node dist/src/server.js",
     "dev": "tsx watch src/server.ts",
     "test": "node --test --test-concurrency=1 dist/tests/*.js",

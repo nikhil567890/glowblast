@@ -5,38 +5,65 @@ import { messageStore } from './messageStore';
 export class CampaignStore {
   public async get(campaignId: string): Promise<StoredCampaign | undefined> {
     const pool = getPool();
-    const res = await pool.query<{
-      campaign_id: string;
-      client_request_token: string | null;
-      campaign_name: string;
-      status: string;
-      template_name: string;
-      template_language: string;
-      total_recipients: number;
-      count_queued: number;
-      count_accepted: number;
-      count_sent: number;
-      count_delivered: number;
-      count_read: number;
-      count_replied?: number;
-      count_failed: number;
-      count_excluded_opt_out: number;
-      created_at: Date;
-      updated_at: Date;
-    }>(
-      `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
-              total_recipients, count_queued, count_accepted, count_sent, count_delivered,
-              count_read, COALESCE(count_replied, 0) AS count_replied, count_failed, count_excluded_opt_out, created_at, updated_at
-       FROM campaigns
-       WHERE campaign_id = $1
-       LIMIT 1;`,
-      [campaignId]
-    );
+    let row: any;
 
-    if (res.rows.length === 0) return undefined;
-    const row = res.rows[0];
+    try {
+      const res = await pool.query<{
+        campaign_id: string;
+        client_request_token: string | null;
+        campaign_name: string;
+        status: string;
+        template_name: string;
+        template_language: string;
+        total_recipients: number;
+        count_queued: number;
+        count_accepted: number;
+        count_sent: number;
+        count_delivered: number;
+        count_read: number;
+        count_replied?: number;
+        count_failed: number;
+        count_excluded_opt_out: number;
+        created_at: Date;
+        updated_at: Date;
+      }>(
+        `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
+                total_recipients, count_queued, count_accepted, count_sent, count_delivered,
+                count_read, count_replied, count_failed, count_excluded_opt_out, created_at, updated_at
+         FROM campaigns
+         WHERE campaign_id = $1
+         LIMIT 1;`,
+        [campaignId]
+      );
+
+      if (res.rows.length === 0) return undefined;
+      row = res.rows[0];
+    } catch (err: any) {
+      // PostgreSQL error 42703: undefined_column (e.g. count_replied column not yet created by migration 008)
+      if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('count_replied'))) {
+        console.warn(`[CampaignStore] 'count_replied' column missing in database. Falling back to legacy query.`);
+        const fallbackRes = await pool.query<any>(
+          `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
+                  total_recipients, count_queued, count_accepted, count_sent, count_delivered,
+                  count_read, 0 AS count_replied, count_failed, count_excluded_opt_out, created_at, updated_at
+           FROM campaigns
+           WHERE campaign_id = $1
+           LIMIT 1;`,
+          [campaignId]
+        );
+        if (fallbackRes.rows.length === 0) return undefined;
+        row = fallbackRes.rows[0];
+      } else {
+        throw err;
+      }
+    }
 
     const messages = await messageStore.getByCampaignId(campaignId);
+
+    const repliedCount =
+      row.count_replied !== undefined && row.count_replied !== null
+        ? Number(row.count_replied)
+        : messages.filter((m) => !!m.repliedAt).length;
 
     return {
       campaignId: row.campaign_id,
@@ -51,12 +78,12 @@ export class CampaignStore {
       sent: row.count_sent,
       delivered: row.count_delivered,
       read: row.count_read,
-      replied: row.count_replied ?? messages.filter((m) => !!m.repliedAt).length,
+      replied: repliedCount,
       failed: row.count_failed,
       excludedOptOut: row.count_excluded_opt_out,
       messages,
-      createdAt: row.created_at.toISOString(),
-      updatedAt: row.updated_at.toISOString(),
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : new Date(row.created_at).toISOString(),
+      updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : new Date(row.updated_at).toISOString(),
     };
   }
 
@@ -146,32 +173,64 @@ export class CampaignStore {
     const newStatus = await this.calculateCampaignStatus(campaignId);
     const pool = getPool();
 
-    await pool.query(
-      `UPDATE campaigns
-       SET status = $2,
-           count_queued = $3,
-           count_accepted = $4,
-           count_sent = $5,
-           count_delivered = $6,
-           count_read = $7,
-           count_replied = $8,
-           count_failed = $9,
-           count_excluded_opt_out = $10,
-           updated_at = NOW()
-       WHERE campaign_id = $1;`,
-      [
-        campaignId,
-        newStatus,
-        summary.queued,
-        summary.accepted,
-        summary.sent,
-        summary.delivered,
-        summary.read,
-        summary.replied,
-        summary.failed,
-        summary.excludedOptOut,
-      ]
-    );
+    try {
+      await pool.query(
+        `UPDATE campaigns
+         SET status = $2,
+             count_queued = $3,
+             count_accepted = $4,
+             count_sent = $5,
+             count_delivered = $6,
+             count_read = $7,
+             count_replied = $8,
+             count_failed = $9,
+             count_excluded_opt_out = $10,
+             updated_at = NOW()
+         WHERE campaign_id = $1;`,
+        [
+          campaignId,
+          newStatus,
+          summary.queued,
+          summary.accepted,
+          summary.sent,
+          summary.delivered,
+          summary.read,
+          summary.replied,
+          summary.failed,
+          summary.excludedOptOut,
+        ]
+      );
+    } catch (err: any) {
+      if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('count_replied'))) {
+        console.warn(`[CampaignStore] 'count_replied' column missing during status update. Falling back to legacy update.`);
+        await pool.query(
+          `UPDATE campaigns
+           SET status = $2,
+               count_queued = $3,
+               count_accepted = $4,
+               count_sent = $5,
+               count_delivered = $6,
+               count_read = $7,
+               count_failed = $8,
+               count_excluded_opt_out = $9,
+               updated_at = NOW()
+           WHERE campaign_id = $1;`,
+          [
+            campaignId,
+            newStatus,
+            summary.queued,
+            summary.accepted,
+            summary.sent,
+            summary.delivered,
+            summary.read,
+            summary.failed,
+            summary.excludedOptOut,
+          ]
+        );
+      } else {
+        throw err;
+      }
+    }
 
     return {
       ...summary,

@@ -7,19 +7,35 @@ import '../models/group.dart';
 import '../models/settings_model.dart';
 import '../models/whatsapp_template.dart';
 import '../models/auth_user.dart';
+import '../models/business_membership.dart';
 import '../demo_data/initial_data.dart';
 import '../../services/excel_service.dart';
 import '../../services/glowblast_backend_client.dart';
 
 class AppRepository extends ChangeNotifier {
-  static const String _keyCustomers = 'glowblast_customers_v3';
-  static const String _keyCampaigns = 'glowblast_campaigns_v3';
-  static const String _keyGroups = 'glowblast_groups_v3';
-  static const String _keyTemplates = 'glowblast_templates_v3';
-  static const String _keySettings = 'glowblast_settings_v3';
+  static const String _baseKeyCustomers = 'glowblast_customers_v3';
+  static const String _baseKeyCampaigns = 'glowblast_campaigns_v3';
+  static const String _baseKeyGroups = 'glowblast_groups_v3';
+  static const String _baseKeyTemplates = 'glowblast_templates_v3';
+  static const String _baseKeySettings = 'glowblast_settings_v3';
   static const String _keyInitializedV3 = 'glowblast_is_initialized_v3';
   static const String _keyAuthToken = 'glowblast_auth_token_v1';
   static const String _keyAuthUser = 'glowblast_auth_user_v1';
+  static const String _keyActiveBusinessId = 'glowblast_active_business_id_v1';
+  static const String _keyUserBusinesses = 'glowblast_user_businesses_v1';
+
+  String _namespacedKey(String baseKey) {
+    if (_activeBusiness != null && _activeBusiness!.businessId.isNotEmpty) {
+      return '${_activeBusiness!.businessId}_$baseKey';
+    }
+    return baseKey;
+  }
+
+  String get _keyCustomers => _namespacedKey(_baseKeyCustomers);
+  String get _keyCampaigns => _namespacedKey(_baseKeyCampaigns);
+  String get _keyGroups => _namespacedKey(_baseKeyGroups);
+  String get _keyTemplates => _namespacedKey(_baseKeyTemplates);
+  String get _keySettings => _namespacedKey(_baseKeySettings);
 
   List<Customer> _customers = [];
   List<Campaign> _campaigns = [];
@@ -28,9 +44,28 @@ class AppRepository extends ChangeNotifier {
   AppSettings _settings = AppSettings();
   String? _authToken;
   AuthUser? _currentUser;
+  List<BusinessMembership> _userBusinesses = [];
+  BusinessMembership? _activeBusiness;
+  int _businessSwitchGeneration = 0;
   bool _isLoading = true;
   bool _isBulkRecordingConsent = false;
-  late GlowBlastBackendClient backendClient = GlowBlastBackendClient(baseUrl: _settings.backendUrl);
+  late GlowBlastBackendClient backendClient = GlowBlastBackendClient(
+    baseUrl: _settings.backendUrl,
+    authToken: _authToken,
+    activeBusinessId: _activeBusiness?.businessId,
+  );
+
+  // Multi-business getters
+  List<BusinessMembership> get userBusinesses => List.unmodifiable(_userBusinesses);
+  BusinessMembership? get activeBusiness => _activeBusiness;
+  String? get activeBusinessId => _activeBusiness?.businessId;
+  bool get hasActiveBusiness => _activeBusiness != null;
+  bool get hasMultipleBusinesses => _userBusinesses.length > 1;
+  bool get hasNoBusinesses => _userBusinesses.isEmpty;
+  int get businessSwitchGeneration => _businessSwitchGeneration;
+  bool get isBusinessOwner => _activeBusiness?.isOwner ?? false;
+  bool get isBusinessAdmin => _activeBusiness?.isAdmin ?? false;
+  bool get isBusinessStaff => _activeBusiness?.isStaff ?? false;
 
   // Auth getters
   bool get isAuthenticated => _authToken != null && _currentUser != null;
@@ -321,10 +356,29 @@ class AppRepository extends ChangeNotifier {
       }
     }
 
-    // Always re-sync backendClient with active settings and persisted token
+    // Load persisted multi-business memberships & active selection
+    final savedBizRaw = prefs.getString(_keyUserBusinesses);
+    if (savedBizRaw != null) {
+      try {
+        final List<dynamic> list = jsonDecode(savedBizRaw);
+        _userBusinesses = list
+            .map((e) => BusinessMembership.fromJson(e as Map<String, dynamic>))
+            .toList();
+        final savedActiveId = prefs.getString(_keyActiveBusinessId);
+        if (savedActiveId != null) {
+          _activeBusiness = _userBusinesses.cast<BusinessMembership?>().firstWhere(
+            (m) => m?.businessId == savedActiveId,
+            orElse: () => null,
+          );
+        }
+      } catch (_) {}
+    }
+
+    // Always re-sync backendClient with active settings, persisted token and active business
     backendClient = GlowBlastBackendClient(
       baseUrl: _settings.backendUrl,
       authToken: _authToken,
+      activeBusinessId: _activeBusiness?.businessId,
     );
 
     // Only inject Meta test recipient if running in non-production developer test mode
@@ -356,17 +410,191 @@ class AppRepository extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyAuthToken, token);
     await prefs.setString(_keyAuthUser, jsonEncode(user.toJson()));
+    await refreshUserBusinesses();
   }
 
-  /// Clears active authenticated session on logout without wiping business data.
+  /// Clears active authenticated session and in-memory business data on logout.
   Future<void> clearAuthSession() async {
     _authToken = null;
     _currentUser = null;
     backendClient.authToken = null;
+    _userBusinesses = [];
+    _activeBusiness = null;
+    backendClient.activeBusinessId = null;
+    _businessSwitchGeneration++;
+
+    // Wipe sensitive in-memory business data on logout
+    _customers = [];
+    _campaigns = [];
+    _groups = [];
+    _templates = [];
+
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_keyAuthToken);
     await prefs.remove(_keyAuthUser);
+    await prefs.remove(_keyActiveBusinessId);
+    await prefs.remove(_keyUserBusinesses);
+  }
+
+  /// Fetches user's business memberships from backend and updates active business.
+  Future<void> refreshUserBusinesses() async {
+    if (_authToken == null || _authToken!.trim().isEmpty) {
+      _userBusinesses = [];
+      _activeBusiness = null;
+      backendClient.activeBusinessId = null;
+      notifyListeners();
+      return;
+    }
+
+    try {
+      final memberships = await backendClient.getMyBusinesses(token: _authToken);
+      _userBusinesses = memberships;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _keyUserBusinesses,
+        jsonEncode(memberships.map((m) => m.toJson()).toList()),
+      );
+
+      // Resolve active business
+      if (memberships.isEmpty) {
+        _activeBusiness = null;
+        backendClient.activeBusinessId = null;
+        notifyListeners();
+        return;
+      }
+
+      final savedId = prefs.getString(_keyActiveBusinessId);
+      BusinessMembership? candidate;
+      if (savedId != null) {
+        candidate = memberships.cast<BusinessMembership?>().firstWhere(
+          (m) => m?.businessId == savedId,
+          orElse: () => null,
+        );
+      }
+
+      // If candidate is not found or not set, select the first membership
+      candidate ??= memberships.first;
+
+      if (_activeBusiness?.businessId != candidate.businessId) {
+        await switchBusiness(candidate);
+      } else {
+        _activeBusiness = candidate;
+        backendClient.activeBusinessId = candidate.businessId;
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('[AppRepository] Error refreshing user businesses: $e');
+    }
+  }
+
+  /// Safely switches active business with generation tracking and cache isolation.
+  Future<bool> switchBusiness(BusinessMembership newBusiness) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // 1. Save current business's data to its namespaced keys before switching
+    if (_activeBusiness != null) {
+      await _saveAll(prefs);
+    }
+
+    // 2. Increment generation counter to discard late async responses
+    _businessSwitchGeneration++;
+    final currentGen = _businessSwitchGeneration;
+
+    // 3. Clear sensitive in-memory business-scoped data
+    _customers = [];
+    _campaigns = [];
+    _groups = [];
+    _templates = [];
+    notifyListeners();
+
+    // 4. Update active business and backend client
+    _activeBusiness = newBusiness;
+    backendClient.activeBusinessId = newBusiness.businessId;
+    await prefs.setString(_keyActiveBusinessId, newBusiness.businessId);
+
+    // 5. Load the target business's cached data
+    await _loadFromPrefs(prefs, isProduction: _settings.isWhatsAppProductionMode);
+
+    // 6. Verify generation hasn't moved (prevents race condition if user clicked rapidly)
+    if (currentGen != _businessSwitchGeneration) {
+      debugPrint('[AppRepository] Business switch generation obsolete ($currentGen vs $_businessSwitchGeneration), ignoring.');
+      return false;
+    }
+
+    notifyListeners();
+    return true;
+  }
+
+  /// Convenience alias for switchBusiness
+  Future<bool> switchActiveBusiness(BusinessMembership newBusiness) => switchBusiness(newBusiness);
+
+  /// Creates a new business and automatically switches context to it.
+  Future<Map<String, dynamic>> createBusiness({
+    required String name,
+    required String slug,
+    String? phone,
+    String? email,
+    String timezone = 'UTC',
+  }) async {
+    final result = await backendClient.createBusiness(
+      name: name,
+      slug: slug,
+      phone: phone,
+      email: email,
+      timezone: timezone,
+      token: _authToken,
+    );
+
+    if (result['success'] == true && result['business'] != null) {
+      await refreshUserBusinesses();
+    }
+    return result;
+  }
+
+  /// Updates business profile fields and syncs locally.
+  Future<Map<String, dynamic>> updateBusinessProfile({
+    String? displayName,
+    String? phone,
+    String? email,
+    String? timezone,
+    String? logoUrl,
+  }) async {
+    if (_activeBusiness == null) {
+      return {'success': false, 'error': {'code': 'NO_ACTIVE_BUSINESS', 'message': 'No active business selected'}};
+    }
+
+    final result = await backendClient.updateBusinessProfile(
+      businessId: _activeBusiness!.businessId,
+      displayName: displayName,
+      phone: phone,
+      email: email,
+      timezone: timezone,
+      logoUrl: logoUrl,
+      token: _authToken,
+    );
+
+    if (result['success'] == true) {
+      final updatedName = displayName?.trim();
+      if (updatedName != null && updatedName.isNotEmpty) {
+        _activeBusiness = _activeBusiness!.copyWith(displayName: updatedName);
+        _settings = _settings.copyWith(businessName: updatedName);
+        // Also update in list
+        final index = _userBusinesses.indexWhere((b) => b.businessId == _activeBusiness!.businessId);
+        if (index != -1) {
+          _userBusinesses[index] = _userBusinesses[index].copyWith(displayName: updatedName);
+        }
+        final prefs = await SharedPreferences.getInstance();
+        await _saveActiveBusinesses(prefs);
+        await prefs.setString(_keySettings, jsonEncode(_settings.toJson()));
+      }
+      notifyListeners();
+    }
+    return result;
+  }
+
+  Future<void> _saveActiveBusinesses(SharedPreferences prefs) async {
+    await prefs.setString(_keyUserBusinesses, jsonEncode(_userBusinesses.map((b) => b.toJson()).toList()));
   }
 
   void _fallbackToMemory({bool isProduction = false}) {

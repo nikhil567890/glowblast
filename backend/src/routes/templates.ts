@@ -1,8 +1,17 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { TemplateService } from '../services/templateService';
+import {
+  requireAuth,
+  requireBusinessMembership,
+  requireAuthorizedWhatsAppConnection,
+} from '../middleware/authMiddleware';
 
 const router = Router();
+
+// Mount authentication and business context middleware
+router.use(requireAuth);
+router.use(requireBusinessMembership());
 
 const createTemplateSchema = z.object({
   name: z
@@ -28,11 +37,11 @@ const updateStatusSchema = z.object({
 
 /**
  * GET /api/templates
- * Lists all WhatsApp templates (optionally filtered by ?mode=test|production).
+ * Lists all WhatsApp templates scoped to the authenticated business (optionally filtered by ?mode=test|production).
  */
 router.get('/', async (req: Request, res: Response) => {
   const mode = req.query.mode === 'production' ? 'production' : req.query.mode === 'test' ? 'test' : undefined;
-  const templates = await TemplateService.listTemplates(mode);
+  const templates = await TemplateService.listTemplates(mode, req.business!.id);
   res.json({
     success: true,
     count: templates.length,
@@ -43,11 +52,11 @@ router.get('/', async (req: Request, res: Response) => {
 
 /**
  * GET /api/templates/:id
- * Retrieves a single template by ID or Meta name.
+ * Retrieves a single template by ID or Meta name, scoped to authenticated business.
  */
 router.get('/:id', async (req: Request, res: Response) => {
   const mode = req.query.mode === 'production' ? 'production' : req.query.mode === 'test' ? 'test' : undefined;
-  const template = await TemplateService.getTemplate(req.params.id, mode);
+  const template = await TemplateService.getTemplate(req.params.id, mode, req.business!.id);
   if (!template) {
     res.status(404).json({
       success: false,
@@ -66,9 +75,9 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 /**
  * POST /api/templates
- * Creates a new template and optionally submits it to Meta WhatsApp Business API.
+ * Creates a new template assigned to the authenticated business. Requires admin/owner role.
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireBusinessMembership('admin'), async (req: Request, res: Response) => {
   const parsed = createTemplateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({
@@ -82,7 +91,7 @@ router.post('/', async (req: Request, res: Response) => {
     return;
   }
 
-  const result = await TemplateService.createTemplate(parsed.data);
+  const result = await TemplateService.createTemplate(parsed.data, req.business!.id);
   res.status(201).json({
     success: true,
     template: result.template,
@@ -92,12 +101,13 @@ router.post('/', async (req: Request, res: Response) => {
 
 /**
  * POST /api/templates/sync
- * Synchronizes templates with official Meta WhatsApp Cloud API / WABA account (?mode=test|production).
+ * Synchronizes templates with official Meta WhatsApp Cloud API / WABA account.
+ * Restricts sync to the initial business with verified WhatsApp connection.
  */
-router.post('/sync', async (req: Request, res: Response) => {
+router.post('/sync', requireAuthorizedWhatsAppConnection, async (req: Request, res: Response) => {
   const rawMode = req.query.mode || req.body?.mode;
   const mode = rawMode === 'production' ? 'production' : 'test';
-  const result = await TemplateService.syncFromMeta(mode);
+  const result = await TemplateService.syncFromMeta(mode, req.business!.id);
   res.json({
     success: result.success,
     mode,
@@ -109,7 +119,7 @@ router.post('/sync', async (req: Request, res: Response) => {
 
 /**
  * PUT /api/templates/:id/status
- * Updates template approval status (e.g. manual import / confirmation).
+ * Updates template approval status.
  */
 router.put('/:id/status', async (req: Request, res: Response) => {
   const parsed = updateStatusSchema.safeParse(req.body);
@@ -125,13 +135,8 @@ router.put('/:id/status', async (req: Request, res: Response) => {
     return;
   }
 
-  const updated = await TemplateService.updateStatus(
-    req.params.id,
-    parsed.data.status,
-    parsed.data.metaStatus
-  );
-
-  if (!updated) {
+  const existing = await TemplateService.getTemplate(req.params.id, undefined, req.business!.id);
+  if (!existing) {
     res.status(404).json({
       success: false,
       error: {
@@ -142,6 +147,12 @@ router.put('/:id/status', async (req: Request, res: Response) => {
     return;
   }
 
+  const updated = await TemplateService.updateStatus(
+    req.params.id,
+    parsed.data.status,
+    parsed.data.metaStatus
+  );
+
   res.json({
     success: true,
     template: updated,
@@ -150,10 +161,10 @@ router.put('/:id/status', async (req: Request, res: Response) => {
 
 /**
  * DELETE /api/templates/:id
- * Removes a template from local store.
+ * Removes a template scoped to the active business.
  */
 router.delete('/:id', async (req: Request, res: Response) => {
-  const deleted = await TemplateService.deleteTemplate(req.params.id);
+  const deleted = await TemplateService.deleteTemplate(req.params.id, req.business!.id);
   if (!deleted) {
     res.status(404).json({
       success: false,

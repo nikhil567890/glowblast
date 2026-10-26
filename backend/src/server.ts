@@ -12,6 +12,7 @@ import templatesRouter from './routes/templates';
 import authRouter from './routes/auth';
 import consentRouter from './routes/consent';
 import customersRouter from './routes/customers';
+import businessesRouter from './routes/businesses';
 
 export const app = express();
 
@@ -63,10 +64,12 @@ app.use('/api/messages', whatsappRouter);
 app.use('/api/whatsapp', whatsappRouter);
 app.use('/api/campaigns', campaignsRouter);
 app.use('/api/webhook', webhookRouter);
+app.use('/api/webhooks', webhookRouter); // Alias to handle plural callback URL path safely
 app.use('/api/templates', templatesRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/consent', consentRouter);
 app.use('/api/customers', customersRouter);
+app.use('/api/businesses', businessesRouter);
 
 // Root informational endpoint
 app.get('/', (_req, res) => {

@@ -1,6 +1,7 @@
 import { PoolClient } from 'pg';
 import { getPool } from '../db/pool';
 import { normalizeWhatsAppPhone } from '../utils/phone';
+import { INITIAL_BUSINESS_ID } from '../middleware/authMiddleware';
 
 export type ConsentStatus = 'opted_in' | 'opted_out' | 'revoked';
 export type ConsentCategory = 'marketing' | 'utility' | 'unclassified';
@@ -73,6 +74,7 @@ export class ConsentStore {
     isAuthorizedAdmin?: boolean;
     allowOptOutOverride?: boolean;
     inboundWebhookId?: string;
+    businessId?: string;
   }): Promise<ConsentRecord | null> {
     const normalized = normalizeWhatsAppPhone(params.phone);
     if (!normalized) {
@@ -90,6 +92,7 @@ export class ConsentStore {
       isAuthorizedAdmin = false,
       allowOptOutOverride = false,
       inboundWebhookId,
+      businessId,
     } = params;
 
     const defaultTextVersion = consentCategory === 'marketing'
@@ -238,31 +241,78 @@ export class ConsentStore {
       const now = new Date();
 
       // 7. Upsert current consent row
-      await client.query(
-        `INSERT INTO customer_consent (
-          normalized_phone, customer_id, consent_category, status, source, evidence, consent_text_version, updated_by, recorded_at, updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
-        ON CONFLICT (normalized_phone, consent_category) DO UPDATE SET
-          customer_id = COALESCE(EXCLUDED.customer_id, customer_consent.customer_id),
-          status = EXCLUDED.status,
-          source = EXCLUDED.source,
-          evidence = EXCLUDED.evidence,
-          consent_text_version = EXCLUDED.consent_text_version,
-          updated_by = EXCLUDED.updated_by,
-          recorded_at = EXCLUDED.recorded_at,
-          updated_at = NOW();`,
-        [normalized, resolvedCustomerId || null, consentCategory, status, source, evidence, effectiveTextVersion || null, updatedBy, now]
-      );
+      await client.query('SAVEPOINT sp_consent_upsert;');
+      try {
+        await client.query(
+          `INSERT INTO customer_consent (
+            normalized_phone, customer_id, consent_category, status, source, evidence, consent_text_version, updated_by, business_id, recorded_at, updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+          ON CONFLICT (normalized_phone, consent_category) DO UPDATE SET
+            customer_id = COALESCE(EXCLUDED.customer_id, customer_consent.customer_id),
+            status = EXCLUDED.status,
+            source = EXCLUDED.source,
+            evidence = EXCLUDED.evidence,
+            consent_text_version = EXCLUDED.consent_text_version,
+            updated_by = EXCLUDED.updated_by,
+            business_id = COALESCE(EXCLUDED.business_id, customer_consent.business_id),
+            recorded_at = EXCLUDED.recorded_at,
+            updated_at = NOW();`,
+          [normalized, resolvedCustomerId || null, consentCategory, status, source, evidence, effectiveTextVersion || null, updatedBy, businessId || null, now]
+        );
+        await client.query('RELEASE SAVEPOINT sp_consent_upsert;');
+      } catch (colErr: any) {
+        await client.query('ROLLBACK TO SAVEPOINT sp_consent_upsert;');
+        if (colErr.code === '42703') {
+          if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+            throw new Error('Multi-business schema migration required for non-initial business consent recording.');
+          }
+          await client.query(
+            `INSERT INTO customer_consent (
+              normalized_phone, customer_id, consent_category, status, source, evidence, consent_text_version, updated_by, recorded_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+            ON CONFLICT (normalized_phone, consent_category) DO UPDATE SET
+              customer_id = COALESCE(EXCLUDED.customer_id, customer_consent.customer_id),
+              status = EXCLUDED.status,
+              source = EXCLUDED.source,
+              evidence = EXCLUDED.evidence,
+              consent_text_version = EXCLUDED.consent_text_version,
+              updated_by = EXCLUDED.updated_by,
+              recorded_at = EXCLUDED.recorded_at,
+              updated_at = NOW();`,
+            [normalized, resolvedCustomerId || null, consentCategory, status, source, evidence, effectiveTextVersion || null, updatedBy, now]
+          );
+        } else {
+          throw colErr;
+        }
+      }
 
       // 8. Insert immutable audit history
-      await client.query(
-        `INSERT INTO consent_audit_log (
-          normalized_phone, customer_id, consent_category, action, previous_status, new_status, source, evidence, consent_text_version, actor, created_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);`,
-        [normalized, resolvedCustomerId || effectiveCustomerId || null, consentCategory, action, previousStatus, status, source, evidence, effectiveTextVersion || null, updatedBy, now]
-      );
+      await client.query('SAVEPOINT sp_consent_audit;');
+      try {
+        await client.query(
+          `INSERT INTO consent_audit_log (
+            normalized_phone, customer_id, consent_category, action, previous_status, new_status, source, evidence, consent_text_version, actor, business_id, created_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`,
+          [normalized, resolvedCustomerId || effectiveCustomerId || null, consentCategory, action, previousStatus, status, source, evidence, effectiveTextVersion || null, updatedBy, businessId || null, now]
+        );
+        await client.query('RELEASE SAVEPOINT sp_consent_audit;');
+      } catch (colErr: any) {
+        await client.query('ROLLBACK TO SAVEPOINT sp_consent_audit;');
+        if (colErr.code === '42703') {
+          await client.query(
+            `INSERT INTO consent_audit_log (
+              normalized_phone, customer_id, consent_category, action, previous_status, new_status, source, evidence, consent_text_version, actor, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);`,
+            [normalized, resolvedCustomerId || effectiveCustomerId || null, consentCategory, action, previousStatus, status, source, evidence, effectiveTextVersion || null, updatedBy, now]
+          );
+        } else {
+          throw colErr;
+        }
+      }
 
       await client.query('COMMIT;');
 
@@ -297,6 +347,7 @@ export class ConsentStore {
     updatedBy: string;
     reason?: string;
     inboundWebhookId?: string;
+    businessId?: string;
   }): Promise<ConsentRecord | null> {
     return this.recordConsent({
       phone: params.phone,
@@ -307,34 +358,69 @@ export class ConsentStore {
       evidence: params.reason || 'Customer opted out',
       updatedBy: params.updatedBy,
       inboundWebhookId: params.inboundWebhookId,
+      businessId: params.businessId,
     });
   }
 
   /**
    * Retrieves consent record for a phone number and specific category from PostgreSQL.
    */
-  public async getConsent(phone: string, category: ConsentCategory = 'marketing'): Promise<ConsentRecord | undefined> {
+  public async getConsent(
+    phone: string,
+    category: ConsentCategory = 'marketing',
+    businessId?: string
+  ): Promise<ConsentRecord | undefined> {
     const normalized = normalizeWhatsAppPhone(phone);
     if (!normalized) return undefined;
 
     const pool = getPool();
-    const res = await pool.query<{
-      normalized_phone: string;
-      customer_id: string | null;
-      consent_category: string;
-      status: string;
-      recorded_at: Date;
-      source: string;
-      evidence: string;
-      consent_text_version: string | null;
-      updated_by: string;
-    }>(
-      `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by
-       FROM customer_consent
-       WHERE normalized_phone = $1 AND consent_category = $2
-       LIMIT 1;`,
-      [normalized, category]
-    );
+    let res;
+
+    if (businessId) {
+      try {
+        res = await pool.query<{
+          normalized_phone: string;
+          customer_id: string | null;
+          consent_category: string;
+          status: string;
+          recorded_at: Date;
+          source: string;
+          evidence: string;
+          consent_text_version: string | null;
+          updated_by: string;
+        }>(
+          `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by
+           FROM customer_consent
+           WHERE normalized_phone = $1 AND consent_category = $2
+             AND (business_id = $3 OR (business_id IS NULL AND $3 = 'a0000000-0000-4000-8000-000000000001'))
+           LIMIT 1;`,
+          [normalized, category, businessId]
+        );
+      } catch (colErr: any) {
+        if (colErr.code === '42703') {
+          if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+            return undefined;
+          }
+          res = await pool.query<any>(
+            `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by
+             FROM customer_consent
+             WHERE normalized_phone = $1 AND consent_category = $2
+             LIMIT 1;`,
+            [normalized, category]
+          );
+        } else {
+          throw colErr;
+        }
+      }
+    } else {
+      res = await pool.query<any>(
+        `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by
+         FROM customer_consent
+         WHERE normalized_phone = $1 AND consent_category = $2
+         LIMIT 1;`,
+        [normalized, category]
+      );
+    }
 
     if (res.rows.length === 0) return undefined;
     const row = res.rows[0];
@@ -355,28 +441,58 @@ export class ConsentStore {
   /**
    * Retrieves all consent records (across marketing, utility, and unclassified) for a recipient phone.
    */
-  public async getConsentsForPhone(phone: string): Promise<ConsentRecord[]> {
+  public async getConsentsForPhone(phone: string, businessId?: string): Promise<ConsentRecord[]> {
     const normalized = normalizeWhatsAppPhone(phone);
     if (!normalized) return [];
 
     const pool = getPool();
-    const res = await pool.query<{
-      normalized_phone: string;
-      customer_id: string | null;
-      consent_category: string;
-      status: string;
-      recorded_at: Date;
-      source: string;
-      evidence: string;
-      consent_text_version: string | null;
-      updated_by: string;
-    }>(
-      `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by
-       FROM customer_consent
-       WHERE normalized_phone = $1
-       ORDER BY consent_category ASC;`,
-      [normalized]
-    );
+    let res;
+
+    if (businessId) {
+      try {
+        res = await pool.query<{
+          normalized_phone: string;
+          customer_id: string | null;
+          consent_category: string;
+          status: string;
+          recorded_at: Date;
+          source: string;
+          evidence: string;
+          consent_text_version: string | null;
+          updated_by: string;
+        }>(
+          `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by
+           FROM customer_consent
+           WHERE normalized_phone = $1
+             AND (business_id = $2 OR (business_id IS NULL AND $2 = 'a0000000-0000-4000-8000-000000000001'))
+           ORDER BY consent_category ASC;`,
+          [normalized, businessId]
+        );
+      } catch (colErr: any) {
+        if (colErr.code === '42703') {
+          if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+            return [];
+          }
+          res = await pool.query<any>(
+            `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by
+             FROM customer_consent
+             WHERE normalized_phone = $1
+             ORDER BY consent_category ASC;`,
+            [normalized]
+          );
+        } else {
+          throw colErr;
+        }
+      }
+    } else {
+      res = await pool.query<any>(
+        `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by
+         FROM customer_consent
+         WHERE normalized_phone = $1
+         ORDER BY consent_category ASC;`,
+        [normalized]
+      );
+    }
 
     return res.rows.map((row) => ({
       phone: row.normalized_phone,
@@ -397,11 +513,15 @@ export class ConsentStore {
    * Returns true ONLY IF record exists in customer_consent AND status === 'opted_in' for explicit category.
    * 'unclassified' or historical unverified consent records NEVER qualify.
    */
-  public async hasActiveConsent(phone: string, category: ConsentCategory = 'marketing'): Promise<boolean> {
+  public async hasActiveConsent(
+    phone: string,
+    category: ConsentCategory = 'marketing',
+    businessId?: string
+  ): Promise<boolean> {
     if (category !== 'marketing' && category !== 'utility') {
       return false;
     }
-    const record = await this.getConsent(phone, category);
+    const record = await this.getConsent(phone, category, businessId);
     if (!record) return false;
     if (record.consentCategory !== category) return false;
     if (record.status !== 'opted_in') return false;
@@ -422,32 +542,62 @@ export class ConsentStore {
   }
 
   /**
-   * Returns all consent records, optionally filtered by category.
+   * Returns all consent records, optionally filtered by category and businessId.
    */
-  public async getAll(category?: ConsentCategory): Promise<ConsentRecord[]> {
+  public async getAll(category?: ConsentCategory, businessId?: string): Promise<ConsentRecord[]> {
     const pool = getPool();
     let query = `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by
                  FROM customer_consent`;
+    const conditions: string[] = [];
     const params: any[] = [];
+    let paramIndex = 1;
+
     if (category) {
+      conditions.push(`consent_category = $${paramIndex++}`);
       params.push(category);
-      query += ` WHERE consent_category = $1`;
+    }
+    if (businessId) {
+      conditions.push(`(business_id = $${paramIndex++} OR (business_id IS NULL AND $${paramIndex - 1} = 'a0000000-0000-4000-8000-000000000001'))`);
+      params.push(businessId);
+    }
+
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(' AND ')}`;
     }
     query += ` ORDER BY recorded_at DESC;`;
 
-    const res = await pool.query<{
-      normalized_phone: string;
-      customer_id: string | null;
-      consent_category: string;
-      status: string;
-      recorded_at: Date;
-      source: string;
-      evidence: string;
-      consent_text_version: string | null;
-      updated_by: string;
-    }>(query, params);
+    let res;
+    try {
+      res = await pool.query<{
+        normalized_phone: string;
+        customer_id: string | null;
+        consent_category: string;
+        status: string;
+        recorded_at: Date;
+        source: string;
+        evidence: string;
+        consent_text_version: string | null;
+        updated_by: string;
+      }>(query, params);
+    } catch (colErr: any) {
+      if (colErr.code === '42703') {
+        if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+          return [];
+        }
+        // Fallback without business_id
+        let fallbackQuery = `SELECT normalized_phone, customer_id, consent_category, status, recorded_at, source, evidence, consent_text_version, updated_by FROM customer_consent`;
+        if (category) {
+          fallbackQuery += ` WHERE consent_category = $1`;
+          res = await pool.query<any>(fallbackQuery, [category]);
+        } else {
+          res = await pool.query<any>(fallbackQuery);
+        }
+      } else {
+        throw colErr;
+      }
+    }
 
-    return res.rows.map((row) => ({
+    return (res.rows as any[]).map((row: any) => ({
       phone: row.normalized_phone,
       customerId: row.customer_id || undefined,
       consentCategory: (row.consent_category as ConsentCategory) || 'unclassified',
@@ -484,12 +634,14 @@ export class ConsentStore {
     updatedBy: string;
     isAuthorizedAdmin?: boolean;
     allowOptOutOverride?: boolean;
+    businessId?: string;
   }): Promise<BulkConsentOutcome> {
     const {
       records,
       updatedBy,
       isAuthorizedAdmin = false,
       allowOptOutOverride = false,
+      businessId,
     } = params;
 
     if (!records || records.length === 0) {
@@ -590,21 +742,52 @@ export class ConsentStore {
       );
 
       // Query existing consent statuses for all normalized phones in one query
-      const existingRes = await client.query<{
-        normalized_phone: string;
-        consent_category: string;
-        status: string;
-        customer_id: string | null;
-        source: string;
-        evidence: string;
-        recorded_at: Date;
-        consent_text_version: string | null;
-      }>(
-        `SELECT normalized_phone, consent_category, status, customer_id, source, evidence, recorded_at, consent_text_version
-         FROM customer_consent
-         WHERE normalized_phone = ANY($1);`,
-        [sortedPhones]
-      );
+      let existingRes;
+      if (businessId) {
+        await client.query('SAVEPOINT sp_bulk_consent_query;');
+        try {
+          existingRes = await client.query<{
+            normalized_phone: string;
+            consent_category: string;
+            status: string;
+            customer_id: string | null;
+            source: string;
+            evidence: string;
+            recorded_at: Date;
+            consent_text_version: string | null;
+          }>(
+            `SELECT normalized_phone, consent_category, status, customer_id, source, evidence, recorded_at, consent_text_version
+             FROM customer_consent
+             WHERE normalized_phone = ANY($1)
+               AND (business_id = $2 OR (business_id IS NULL AND $2 = 'a0000000-0000-4000-8000-000000000001'));`,
+            [sortedPhones, businessId]
+          );
+          await client.query('RELEASE SAVEPOINT sp_bulk_consent_query;');
+        } catch (colErr: any) {
+          await client.query('ROLLBACK TO SAVEPOINT sp_bulk_consent_query;');
+          if (colErr.code === '42703') {
+            if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+              existingRes = { rows: [] } as any;
+            } else {
+              existingRes = await client.query<any>(
+                `SELECT normalized_phone, consent_category, status, customer_id, source, evidence, recorded_at, consent_text_version
+                 FROM customer_consent
+                 WHERE normalized_phone = ANY($1);`,
+                [sortedPhones]
+              );
+            }
+          } else {
+            throw colErr;
+          }
+        }
+      } else {
+        existingRes = await client.query<any>(
+          `SELECT normalized_phone, consent_category, status, customer_id, source, evidence, recorded_at, consent_text_version
+           FROM customer_consent
+           WHERE normalized_phone = ANY($1);`,
+          [sortedPhones]
+        );
+      }
 
       const existingMap = new Map<string, {
         status: ConsentStatus;
@@ -823,57 +1006,133 @@ export class ConsentStore {
 
       // Execute batch upsert into customer_consent if any changes
       if (upsertConsent.normalizedPhones.length > 0) {
-        await client.query(
-          `INSERT INTO customer_consent (
-            normalized_phone, customer_id, consent_category, status, source, evidence, consent_text_version, updated_by, recorded_at, updated_at
-          )
-          SELECT * FROM UNNEST(
-            $1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[], $5::varchar[], $6::text[], $7::varchar[], $8::varchar[], $9::timestamptz[], $9::timestamptz[]
-          ) AS t(normalized_phone, customer_id, consent_category, status, source, evidence, consent_text_version, updated_by, recorded_at, updated_at)
-          ON CONFLICT (normalized_phone, consent_category) DO UPDATE SET
-            customer_id = COALESCE(EXCLUDED.customer_id, customer_consent.customer_id),
-            status = EXCLUDED.status,
-            source = EXCLUDED.source,
-            evidence = EXCLUDED.evidence,
-            consent_text_version = EXCLUDED.consent_text_version,
-            updated_by = EXCLUDED.updated_by,
-            recorded_at = EXCLUDED.recorded_at,
-            updated_at = NOW();`,
-          [
-            upsertConsent.normalizedPhones,
-            upsertConsent.customerIds,
-            upsertConsent.categories,
-            upsertConsent.statuses,
-            upsertConsent.sources,
-            upsertConsent.evidences,
-            upsertConsent.textVersions,
-            upsertConsent.updatedBys,
-            upsertConsent.recordedAts,
-          ]
-        );
+        const businessIds = upsertConsent.normalizedPhones.map(() => businessId || null);
+        await client.query('SAVEPOINT sp_bulk_consent_upsert;');
+        try {
+          await client.query(
+            `INSERT INTO customer_consent (
+              normalized_phone, customer_id, consent_category, status, source, evidence, consent_text_version, updated_by, business_id, recorded_at, updated_at
+            )
+            SELECT * FROM UNNEST(
+              $1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[], $5::varchar[], $6::text[], $7::varchar[], $8::varchar[], $9::uuid[], $10::timestamptz[], $10::timestamptz[]
+            ) AS t(normalized_phone, customer_id, consent_category, status, source, evidence, consent_text_version, updated_by, business_id, recorded_at, updated_at)
+            ON CONFLICT (normalized_phone, consent_category) DO UPDATE SET
+              customer_id = COALESCE(EXCLUDED.customer_id, customer_consent.customer_id),
+              status = EXCLUDED.status,
+              source = EXCLUDED.source,
+              evidence = EXCLUDED.evidence,
+              consent_text_version = EXCLUDED.consent_text_version,
+              updated_by = EXCLUDED.updated_by,
+              business_id = COALESCE(EXCLUDED.business_id, customer_consent.business_id),
+              recorded_at = EXCLUDED.recorded_at,
+              updated_at = NOW();`,
+            [
+              upsertConsent.normalizedPhones,
+              upsertConsent.customerIds,
+              upsertConsent.categories,
+              upsertConsent.statuses,
+              upsertConsent.sources,
+              upsertConsent.evidences,
+              upsertConsent.textVersions,
+              upsertConsent.updatedBys,
+              businessIds,
+              upsertConsent.recordedAts,
+            ]
+          );
+          await client.query('RELEASE SAVEPOINT sp_bulk_consent_upsert;');
+        } catch (colErr: any) {
+          await client.query('ROLLBACK TO SAVEPOINT sp_bulk_consent_upsert;');
+          if (colErr.code === '42703') {
+            if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+              throw new Error('Multi-business schema migration required for non-initial business bulk consent recording.');
+            }
+            await client.query(
+              `INSERT INTO customer_consent (
+                normalized_phone, customer_id, consent_category, status, source, evidence, consent_text_version, updated_by, recorded_at, updated_at
+              )
+              SELECT * FROM UNNEST(
+                $1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[], $5::varchar[], $6::text[], $7::varchar[], $8::varchar[], $9::timestamptz[], $9::timestamptz[]
+              ) AS t(normalized_phone, customer_id, consent_category, status, source, evidence, consent_text_version, updated_by, recorded_at, updated_at)
+              ON CONFLICT (normalized_phone, consent_category) DO UPDATE SET
+                customer_id = COALESCE(EXCLUDED.customer_id, customer_consent.customer_id),
+                status = EXCLUDED.status,
+                source = EXCLUDED.source,
+                evidence = EXCLUDED.evidence,
+                consent_text_version = EXCLUDED.consent_text_version,
+                updated_by = EXCLUDED.updated_by,
+                recorded_at = EXCLUDED.recorded_at,
+                updated_at = NOW();`,
+              [
+                upsertConsent.normalizedPhones,
+                upsertConsent.customerIds,
+                upsertConsent.categories,
+                upsertConsent.statuses,
+                upsertConsent.sources,
+                upsertConsent.evidences,
+                upsertConsent.textVersions,
+                upsertConsent.updatedBys,
+                upsertConsent.recordedAts,
+              ]
+            );
+          } else {
+            throw colErr;
+          }
+        }
 
         // Execute batch insert into consent_audit_log
-        await client.query(
-          `INSERT INTO consent_audit_log (
-            normalized_phone, customer_id, consent_category, action, previous_status, new_status, source, evidence, consent_text_version, actor, created_at
-          )
-          SELECT * FROM UNNEST(
-            $1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::text[], $9::varchar[], $10::varchar[], $11::timestamptz[]
-          );`,
-          [
-            insertAudit.normalizedPhones,
-            insertAudit.customerIds,
-            insertAudit.categories,
-            insertAudit.actions,
-            insertAudit.previousStatuses,
-            insertAudit.newStatuses,
-            insertAudit.sources,
-            insertAudit.evidences,
-            insertAudit.textVersions,
-            insertAudit.actors,
-            insertAudit.createdAts,
-          ]
-        );
+        await client.query('SAVEPOINT sp_bulk_consent_audit;');
+        try {
+          await client.query(
+            `INSERT INTO consent_audit_log (
+              normalized_phone, customer_id, consent_category, action, previous_status, new_status, source, evidence, consent_text_version, actor, business_id, created_at
+            )
+            SELECT * FROM UNNEST(
+              $1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::text[], $9::varchar[], $10::varchar[], $11::uuid[], $12::timestamptz[]
+            );`,
+            [
+              insertAudit.normalizedPhones,
+              insertAudit.customerIds,
+              insertAudit.categories,
+              insertAudit.actions,
+              insertAudit.previousStatuses,
+              insertAudit.newStatuses,
+              insertAudit.sources,
+              insertAudit.evidences,
+              insertAudit.textVersions,
+              insertAudit.actors,
+              businessIds,
+              insertAudit.createdAts,
+            ]
+          );
+          await client.query('RELEASE SAVEPOINT sp_bulk_consent_audit;');
+        } catch (colErr: any) {
+          await client.query('ROLLBACK TO SAVEPOINT sp_bulk_consent_audit;');
+          if (colErr.code === '42703') {
+            await client.query(
+              `INSERT INTO consent_audit_log (
+                normalized_phone, customer_id, consent_category, action, previous_status, new_status, source, evidence, consent_text_version, actor, created_at
+              )
+              SELECT * FROM UNNEST(
+                $1::varchar[], $2::varchar[], $3::varchar[], $4::varchar[], $5::varchar[], $6::varchar[], $7::varchar[], $8::text[], $9::varchar[], $10::varchar[], $11::timestamptz[]
+              );`,
+              [
+                insertAudit.normalizedPhones,
+                insertAudit.customerIds,
+                insertAudit.categories,
+                insertAudit.actions,
+                insertAudit.previousStatuses,
+                insertAudit.newStatuses,
+                insertAudit.sources,
+                insertAudit.evidences,
+                insertAudit.textVersions,
+                insertAudit.actors,
+                insertAudit.createdAts,
+              ]
+            );
+          } else {
+            throw colErr;
+          }
+        }
       }
 
       await client.query('COMMIT;');

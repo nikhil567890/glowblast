@@ -8,6 +8,7 @@ import { campaignStore } from '../src/store/campaignStore';
 import { messageStore } from '../src/store/messageStore';
 import { CampaignService } from '../src/services/campaignService';
 import { getPool } from '../src/db/pool';
+import { businessStore } from '../src/store/businessStore';
 
 describe('Schema Resilience & Crash Prevention Suite', () => {
   let server: any;
@@ -15,6 +16,27 @@ describe('Schema Resilience & Crash Prevention Suite', () => {
   let validToken: string;
 
   beforeEach(() => {
+    businessStore.setMockBusiness({
+      id: 'a0000000-0000-4000-8000-000000000001',
+      slug: 'initial-spa',
+      displayName: 'Flagship Spa',
+      ownerUserId: 'usr_schema_test',
+      timezone: 'Asia/Kolkata',
+      isActive: true,
+      productionEnabled: true,
+      dailyRecipientLimit: 200,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    businessStore.setMockMember({
+      id: 'mem_schema_test',
+      businessId: 'a0000000-0000-4000-8000-000000000001',
+      userId: 'usr_schema_test',
+      role: 'owner',
+      joinedAt: new Date(),
+      updatedAt: new Date(),
+    });
+
     if (!server) {
       server = app.listen(0);
       server.unref();
@@ -29,6 +51,7 @@ describe('Schema Resilience & Crash Prevention Suite', () => {
   });
 
   after(async () => {
+    businessStore.clearMock();
     if (server) {
       await new Promise<void>((resolve) => {
         if (typeof server.closeAllConnections === 'function') {
@@ -211,7 +234,9 @@ describe('Schema Resilience & Crash Prevention Suite', () => {
     };
 
     try {
-      const res = await fetch(`${baseUrl}/api/campaigns/GB-NONEXISTENT-9999`);
+      const res = await fetch(`${baseUrl}/api/campaigns/GB-NONEXISTENT-9999`, {
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
       assert.strictEqual(res.status, 500);
       const data = (await res.json()) as any;
       assert.strictEqual(data.success, false);

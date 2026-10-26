@@ -59,6 +59,11 @@ const envSchema = z.object({
   BREVO_SENDER_NAME: z.string().default('GlowBlast'),
   JWT_SECRET: z.string().default('glowblast_jwt_super_secret_dev_2026'),
   OTP_HMAC_SECRET: z.string().default('glowblast_otp_hmac_secret_dev_2026'),
+  // AES-256-GCM encryption key for multi-business WABA tokens (32 bytes = 64 hex chars or 44 base64 chars)
+  // Canonical: WABA_TOKEN_ENCRYPTION_KEY, with seamless fallback alias: WABA_ENCRYPTION_KEY
+  WABA_TOKEN_ENCRYPTION_KEY: z.string().optional(),
+  WABA_ENCRYPTION_KEY: z.string().optional(),
+  META_APP_SECRET: z.string().optional(),
   // Neon PostgreSQL Database Configuration
   DATABASE_URL: z.string().optional(),
   TEST_DATABASE_URL: z.string().optional(),
@@ -93,6 +98,7 @@ export function getSafeConfigStatus() {
     displayNumber: env.TEST_WHATSAPP_DISPLAY_NUMBER,
     apiVersion: env.WHATSAPP_API_VERSION,
     brevoConfigured: !!(env.BREVO_API_KEY && env.BREVO_SENDER_EMAIL),
+    wabaEncryptionConfigured: !!(env.WABA_TOKEN_ENCRYPTION_KEY || env.WABA_ENCRYPTION_KEY),
     database: getSafeDatabaseStatus(),
     modes: {
       demo: {

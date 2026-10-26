@@ -1,47 +1,39 @@
 import { getPool } from '../db/pool';
 import { StoredCampaign, CampaignSummary, CampaignStatus } from '../types/campaign';
 import { messageStore } from './messageStore';
+import { INITIAL_BUSINESS_ID } from '../middleware/authMiddleware';
 
 export class CampaignStore {
-  public async get(campaignId: string): Promise<StoredCampaign | undefined> {
+  public async get(campaignId: string, businessId?: string): Promise<StoredCampaign | undefined> {
     const pool = getPool();
     let row: any;
 
     try {
-      const res = await pool.query<{
-        campaign_id: string;
-        client_request_token: string | null;
-        campaign_name: string;
-        status: string;
-        template_name: string;
-        template_language: string;
-        total_recipients: number;
-        count_queued: number;
-        count_accepted: number;
-        count_sent: number;
-        count_delivered: number;
-        count_read: number;
-        count_replied?: number;
-        count_failed: number;
-        count_excluded_opt_out: number;
-        created_at: Date;
-        updated_at: Date;
-      }>(
-        `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
-                total_recipients, count_queued, count_accepted, count_sent, count_delivered,
-                count_read, count_replied, count_failed, count_excluded_opt_out, created_at, updated_at
-         FROM campaigns
-         WHERE campaign_id = $1
-         LIMIT 1;`,
-        [campaignId]
-      );
-
-      if (res.rows.length === 0) return undefined;
-      row = res.rows[0];
+      let query = `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
+                          total_recipients, count_queued, count_accepted, count_sent, count_delivered,
+                          count_read, count_replied, count_failed, count_excluded_opt_out, created_at, updated_at`;
+      
+      if (businessId) {
+        query += `, business_id FROM campaigns
+                  WHERE campaign_id = $1
+                    AND (business_id = $2 OR (business_id IS NULL AND $2 = 'a0000000-0000-4000-8000-000000000001'))
+                  LIMIT 1;`;
+        const res = await pool.query(query, [campaignId, businessId]);
+        if (res.rows.length === 0) return undefined;
+        row = res.rows[0];
+      } else {
+        query += ` FROM campaigns WHERE campaign_id = $1 LIMIT 1;`;
+        const res = await pool.query(query, [campaignId]);
+        if (res.rows.length === 0) return undefined;
+        row = res.rows[0];
+      }
     } catch (err: any) {
-      // PostgreSQL error 42703: undefined_column (e.g. count_replied column not yet created by migration 008)
-      if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('count_replied'))) {
-        console.warn(`[CampaignStore] 'count_replied' column missing in database. Falling back to legacy query.`);
+      if (err.code === '42703' || (err.message && (err.message.includes('count_replied') || err.message.includes('business_id')))) {
+        // Safe fail-closed compatibility: non-initial businesses have zero campaigns in unmigrated database
+        if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+          return undefined;
+        }
+        // Fallback without count_replied or business_id
         const fallbackRes = await pool.query<any>(
           `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
                   total_recipients, count_queued, count_accepted, count_sent, count_delivered,
@@ -67,6 +59,7 @@ export class CampaignStore {
 
     return {
       campaignId: row.campaign_id,
+      businessId: row.business_id || undefined,
       clientRequestToken: row.client_request_token || undefined,
       campaignName: row.campaign_name,
       status: row.status as CampaignStatus,
@@ -87,18 +80,43 @@ export class CampaignStore {
     };
   }
 
-  public async getByClientRequestToken(token: string): Promise<StoredCampaign | undefined> {
+  public async getByClientRequestToken(token: string, businessId?: string): Promise<StoredCampaign | undefined> {
     const pool = getPool();
-    const res = await pool.query<{ campaign_id: string }>(
-      `SELECT campaign_id FROM campaigns WHERE client_request_token = $1 LIMIT 1;`,
-      [token]
-    );
+    let res;
+    if (businessId) {
+      try {
+        res = await pool.query<{ campaign_id: string }>(
+          `SELECT campaign_id FROM campaigns
+           WHERE client_request_token = $1
+             AND (business_id = $2 OR (business_id IS NULL AND $2 = 'a0000000-0000-4000-8000-000000000001'))
+           LIMIT 1;`,
+          [token, businessId]
+        );
+      } catch (err: any) {
+        if (err.code === '42703') {
+          if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+            return undefined;
+          }
+          res = await pool.query<{ campaign_id: string }>(
+            `SELECT campaign_id FROM campaigns WHERE client_request_token = $1 LIMIT 1;`,
+            [token]
+          );
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      res = await pool.query<{ campaign_id: string }>(
+        `SELECT campaign_id FROM campaigns WHERE client_request_token = $1 LIMIT 1;`,
+        [token]
+      );
+    }
     if (res.rows.length === 0) return undefined;
-    return this.get(res.rows[0].campaign_id);
+    return this.get(res.rows[0].campaign_id, businessId);
   }
 
-  public async getSummary(campaignId: string): Promise<CampaignSummary | undefined> {
-    const camp = await this.get(campaignId);
+  public async getSummary(campaignId: string, businessId?: string): Promise<CampaignSummary | undefined> {
+    const camp = await this.get(campaignId, businessId);
     if (!camp) return undefined;
 
     // Recalculate summary metrics from actual messages in PostgreSQL
@@ -116,6 +134,7 @@ export class CampaignStore {
 
     return {
       campaignId: camp.campaignId,
+      businessId: camp.businessId,
       clientRequestToken: camp.clientRequestToken,
       campaignName: camp.campaignName,
       status: camp.status,
@@ -135,8 +154,79 @@ export class CampaignStore {
     };
   }
 
-  public async calculateCampaignStatus(campaignId: string): Promise<CampaignStatus> {
-    const camp = await this.get(campaignId);
+  public async listSummaries(businessId?: string, limit: number = 50): Promise<CampaignSummary[]> {
+    const pool = getPool();
+    let rows: any[];
+
+    if (businessId) {
+      try {
+        const res = await pool.query(
+          `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
+                  total_recipients, count_queued, count_accepted, count_sent, count_delivered,
+                  count_read, count_replied, count_failed, count_excluded_opt_out, business_id, created_at, updated_at
+           FROM campaigns
+           WHERE (business_id = $1 OR (business_id IS NULL AND $1 = 'a0000000-0000-4000-8000-000000000001'))
+           ORDER BY created_at DESC
+           LIMIT $2;`,
+          [businessId, limit]
+        );
+        rows = res.rows;
+      } catch (err: any) {
+        if (err.code === '42703') {
+          if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+            return [];
+          }
+          const fallbackRes = await pool.query(
+            `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
+                    total_recipients, count_queued, count_accepted, count_sent, count_delivered,
+                    count_read, 0 AS count_replied, count_failed, count_excluded_opt_out, created_at, updated_at
+             FROM campaigns
+             ORDER BY created_at DESC
+             LIMIT $1;`,
+            [limit]
+          );
+          rows = fallbackRes.rows;
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      const res = await pool.query(
+        `SELECT campaign_id, client_request_token, campaign_name, status, template_name, template_language,
+                total_recipients, count_queued, count_accepted, count_sent, count_delivered,
+                count_read, 0 AS count_replied, count_failed, count_excluded_opt_out, created_at, updated_at
+         FROM campaigns
+         ORDER BY created_at DESC
+         LIMIT $1;`,
+        [limit]
+      );
+      rows = res.rows;
+    }
+
+    return rows.map((row) => ({
+      campaignId: row.campaign_id,
+      businessId: row.business_id || undefined,
+      clientRequestToken: row.client_request_token || undefined,
+      campaignName: row.campaign_name,
+      status: row.status as CampaignStatus,
+      templateName: row.template_name,
+      templateLanguage: row.template_language,
+      total: row.total_recipients,
+      queued: row.count_queued,
+      accepted: row.count_accepted,
+      sent: row.count_sent,
+      delivered: row.count_delivered,
+      read: row.count_read,
+      replied: row.count_replied ? Number(row.count_replied) : 0,
+      failed: row.count_failed,
+      excludedOptOut: row.count_excluded_opt_out,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : new Date(row.created_at).toISOString(),
+      updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : new Date(row.updated_at).toISOString(),
+    }));
+  }
+
+  public async calculateCampaignStatus(campaignId: string, businessId?: string): Promise<CampaignStatus> {
+    const camp = await this.get(campaignId, businessId);
     if (!camp) return 'failed';
 
     const msgs = camp.messages;
@@ -166,11 +256,11 @@ export class CampaignStore {
     return 'completed';
   }
 
-  public async recalculateAndSaveCampaignStatus(campaignId: string): Promise<CampaignSummary | undefined> {
-    const summary = await this.getSummary(campaignId);
+  public async recalculateAndSaveCampaignStatus(campaignId: string, businessId?: string): Promise<CampaignSummary | undefined> {
+    const summary = await this.getSummary(campaignId, businessId);
     if (!summary) return undefined;
 
-    const newStatus = await this.calculateCampaignStatus(campaignId);
+    const newStatus = await this.calculateCampaignStatus(campaignId, businessId);
     const pool = getPool();
 
     try {
@@ -186,7 +276,8 @@ export class CampaignStore {
              count_failed = $9,
              count_excluded_opt_out = $10,
              updated_at = NOW()
-         WHERE campaign_id = $1;`,
+         WHERE campaign_id = $1
+           AND ($11::uuid IS NULL OR business_id = $11::uuid OR (business_id IS NULL AND $11::uuid = 'a0000000-0000-4000-8000-000000000001'::uuid));`,
         [
           campaignId,
           newStatus,
@@ -198,11 +289,12 @@ export class CampaignStore {
           summary.replied,
           summary.failed,
           summary.excludedOptOut,
+          businessId || null,
         ]
       );
     } catch (err: any) {
       if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('count_replied'))) {
-        console.warn(`[CampaignStore] 'count_replied' column missing during status update. Falling back to legacy update.`);
+        console.warn(`[CampaignStore] 'count_replied' or 'business_id' column missing during status update. Falling back to legacy update.`);
         await pool.query(
           `UPDATE campaigns
            SET status = $2,
@@ -239,49 +331,100 @@ export class CampaignStore {
     };
   }
 
-  public async create(campaign: StoredCampaign): Promise<StoredCampaign> {
+  public async create(campaign: StoredCampaign, businessId?: string): Promise<StoredCampaign> {
     const pool = getPool();
-    await pool.query(
-      `INSERT INTO campaigns (
-        campaign_id, client_request_token, campaign_name, mode, status,
-        template_name, template_language, total_recipients,
-        count_queued, count_accepted, count_sent, count_delivered, count_read, count_failed, count_excluded_opt_out,
-        created_at, updated_at
-      )
-      VALUES ($1, $2, $3, 'test', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-      ON CONFLICT (campaign_id) DO UPDATE SET
-        status = EXCLUDED.status,
-        count_queued = EXCLUDED.count_queued,
-        count_accepted = EXCLUDED.count_accepted,
-        count_sent = EXCLUDED.count_sent,
-        count_delivered = EXCLUDED.count_delivered,
-        count_read = EXCLUDED.count_read,
-        count_failed = EXCLUDED.count_failed,
-        count_excluded_opt_out = EXCLUDED.count_excluded_opt_out,
-        updated_at = NOW();`,
-      [
-        campaign.campaignId,
-        campaign.clientRequestToken || null,
-        campaign.campaignName,
-        campaign.status,
-        campaign.templateName || 'hello_world',
-        campaign.templateLanguage || 'en_US',
-        campaign.total,
-        campaign.queued,
-        campaign.accepted,
-        campaign.sent,
-        campaign.delivered,
-        campaign.read,
-        campaign.failed,
-        campaign.excludedOptOut,
-        campaign.createdAt ? new Date(campaign.createdAt) : new Date(),
-        campaign.updatedAt ? new Date(campaign.updatedAt) : new Date(),
-      ]
-    );
+    const effectiveBizId = businessId || campaign.businessId || null;
+
+    try {
+      await pool.query(
+        `INSERT INTO campaigns (
+          campaign_id, client_request_token, campaign_name, mode, status,
+          template_name, template_language, total_recipients,
+          count_queued, count_accepted, count_sent, count_delivered, count_read, count_failed, count_excluded_opt_out,
+          business_id, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, 'test', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        ON CONFLICT (campaign_id) DO UPDATE SET
+          status = EXCLUDED.status,
+          count_queued = EXCLUDED.count_queued,
+          count_accepted = EXCLUDED.count_accepted,
+          count_sent = EXCLUDED.count_sent,
+          count_delivered = EXCLUDED.count_delivered,
+          count_read = EXCLUDED.count_read,
+          count_failed = EXCLUDED.count_failed,
+          count_excluded_opt_out = EXCLUDED.count_excluded_opt_out,
+          business_id = COALESCE(EXCLUDED.business_id, campaigns.business_id),
+          updated_at = NOW();`,
+        [
+          campaign.campaignId,
+          campaign.clientRequestToken || null,
+          campaign.campaignName,
+          campaign.status,
+          campaign.templateName || 'hello_world',
+          campaign.templateLanguage || 'en_US',
+          campaign.total,
+          campaign.queued,
+          campaign.accepted,
+          campaign.sent,
+          campaign.delivered,
+          campaign.read,
+          campaign.failed,
+          campaign.excludedOptOut,
+          effectiveBizId,
+          campaign.createdAt ? new Date(campaign.createdAt) : new Date(),
+          campaign.updatedAt ? new Date(campaign.updatedAt) : new Date(),
+        ]
+      );
+    } catch (err: any) {
+      if (err.code === '42703') {
+        if (effectiveBizId && effectiveBizId !== INITIAL_BUSINESS_ID) {
+          throw new Error('Multi-business schema migration required for non-initial business campaign creation.');
+        }
+        await pool.query(
+          `INSERT INTO campaigns (
+            campaign_id, client_request_token, campaign_name, mode, status,
+            template_name, template_language, total_recipients,
+            count_queued, count_accepted, count_sent, count_delivered, count_read, count_failed, count_excluded_opt_out,
+            created_at, updated_at
+          )
+          VALUES ($1, $2, $3, 'test', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+          ON CONFLICT (campaign_id) DO UPDATE SET
+            status = EXCLUDED.status,
+            count_queued = EXCLUDED.count_queued,
+            count_accepted = EXCLUDED.count_accepted,
+            count_sent = EXCLUDED.count_sent,
+            count_delivered = EXCLUDED.count_delivered,
+            count_read = EXCLUDED.count_read,
+            count_failed = EXCLUDED.count_failed,
+            count_excluded_opt_out = EXCLUDED.count_excluded_opt_out,
+            updated_at = NOW();`,
+          [
+            campaign.campaignId,
+            campaign.clientRequestToken || null,
+            campaign.campaignName,
+            campaign.status,
+            campaign.templateName || 'hello_world',
+            campaign.templateLanguage || 'en_US',
+            campaign.total,
+            campaign.queued,
+            campaign.accepted,
+            campaign.sent,
+            campaign.delivered,
+            campaign.read,
+            campaign.failed,
+            campaign.excludedOptOut,
+            campaign.createdAt ? new Date(campaign.createdAt) : new Date(),
+            campaign.updatedAt ? new Date(campaign.updatedAt) : new Date(),
+          ]
+        );
+      } else {
+        throw err;
+      }
+    }
 
     if (campaign.messages && campaign.messages.length > 0) {
       for (const msg of campaign.messages) {
-        await messageStore.upsert(msg);
+        await messageStore.upsert(effectiveBizId ? { ...msg, businessId: effectiveBizId } : msg);
       }
     }
 

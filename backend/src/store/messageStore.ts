@@ -1,5 +1,6 @@
 import { getPool } from '../db/pool';
 import { StoredMessage, MessageStatus } from '../types/message';
+import { INITIAL_BUSINESS_ID } from '../middleware/authMiddleware';
 
 const STATUS_PRECEDENCE: Record<MessageStatus, number> = {
   queued: 0,
@@ -17,11 +18,26 @@ export class MessageStore {
   /**
    * Fetches a message by its internal ID (e.g. campaignId_localCustomerId) from PostgreSQL.
    */
-  public async get(id: string): Promise<StoredMessage | undefined> {
+  public async get(id: string, businessId?: string): Promise<StoredMessage | undefined> {
     const pool = getPool();
     let row: any;
 
     try {
+      let query = `
+        SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+               provider_message_id, template_name, template_language,
+               error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
+        FROM campaign_messages
+        WHERE id = $1
+      `;
+      const params: any[] = [id];
+
+      if (businessId) {
+        query += ` AND (business_id = $2 OR (business_id IS NULL AND $2 = 'a0000000-0000-4000-8000-000000000001'))`;
+        params.push(businessId);
+      }
+      query += ` LIMIT 1;`;
+
       const res = await pool.query<{
         id: string;
         campaign_id: string;
@@ -39,21 +55,16 @@ export class MessageStore {
         replied_at: Date | null;
         created_at: Date;
         updated_at: Date;
-      }>(
-        `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
-                provider_message_id, template_name, template_language,
-                error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
-         FROM campaign_messages
-         WHERE id = $1
-         LIMIT 1;`,
-        [id]
-      );
+      }>(query, params);
 
       if (res.rows.length === 0) return undefined;
       row = res.rows[0];
     } catch (err: any) {
       if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('replied_at'))) {
-        console.warn(`[MessageStore] 'replied_at' column missing in database. Falling back to legacy query.`);
+        if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+          return undefined;
+        }
+        console.warn(`[MessageStore] 'replied_at' or 'business_id' column missing in database. Falling back to legacy query.`);
         const fallback = await pool.query<any>(
           `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
                   provider_message_id, template_name, template_language,
@@ -74,27 +85,37 @@ export class MessageStore {
   }
 
   /**
-   * Fetches a message by Meta's providerMessageId (wamid).
+   * Fetches a message by Meta's providerMessageId (wamid), optionally scoped by businessId.
    */
-  public async getByProviderId(providerMessageId: string): Promise<StoredMessage | undefined> {
+  public async getByProviderId(providerMessageId: string, businessId?: string): Promise<StoredMessage | undefined> {
     const pool = getPool();
     let row: any;
 
     try {
-      const res = await pool.query(
-        `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
-                provider_message_id, template_name, template_language,
-                error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
-         FROM campaign_messages
-         WHERE provider_message_id = $1
-         LIMIT 1;`,
-        [providerMessageId]
-      );
+      let query = `
+        SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+               provider_message_id, template_name, template_language,
+               error_code, error_title, error_message, error_details, replied_at, created_at, updated_at
+        FROM campaign_messages
+        WHERE provider_message_id = $1
+      `;
+      const params: any[] = [providerMessageId];
+
+      if (businessId) {
+        query += ` AND (business_id = $2 OR (business_id IS NULL AND $2 = 'a0000000-0000-4000-8000-000000000001'))`;
+        params.push(businessId);
+      }
+      query += ` LIMIT 1;`;
+
+      const res = await pool.query(query, params);
 
       if (res.rows.length === 0) return undefined;
       row = res.rows[0];
     } catch (err: any) {
       if (err.code === '42703' || (err.message && err.message.toLowerCase().includes('replied_at'))) {
+        if (businessId && businessId !== INITIAL_BUSINESS_ID) {
+          return undefined;
+        }
         const fallback = await pool.query(
           `SELECT id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
                   provider_message_id, template_name, template_language,
@@ -186,43 +207,93 @@ export class MessageStore {
       [msg.campaignId]
     );
 
-    const res = await pool.query(
-      `INSERT INTO campaign_messages (
-        id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
-        provider_message_id, template_name, template_language,
-        error_code, error_title, error_message, error_details, created_at, updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
-      ON CONFLICT (id) DO UPDATE SET
-        status = EXCLUDED.status,
-        provider_message_id = COALESCE(EXCLUDED.provider_message_id, campaign_messages.provider_message_id),
-        template_name = COALESCE(EXCLUDED.template_name, campaign_messages.template_name),
-        template_language = COALESCE(EXCLUDED.template_language, campaign_messages.template_language),
-        error_code = COALESCE(EXCLUDED.error_code, campaign_messages.error_code),
-        error_title = COALESCE(EXCLUDED.error_title, campaign_messages.error_title),
-        error_message = COALESCE(EXCLUDED.error_message, campaign_messages.error_message),
-        error_details = COALESCE(EXCLUDED.error_details, campaign_messages.error_details),
-        updated_at = NOW()
-      RETURNING id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
-                provider_message_id, template_name, template_language,
-                error_code, error_title, error_message, error_details, created_at, updated_at;`,
-      [
-        msg.id,
-        msg.campaignId,
-        msg.localCustomerId,
-        msg.recipientName,
-        msg.normalizedPhone,
-        msg.status,
-        msg.providerMessageId || null,
-        msg.templateName || null,
-        msg.templateLanguage || null,
-        msg.errorCode || null,
-        msg.errorTitle || null,
-        msg.errorMessage || null,
-        msg.errorDetails || null,
-        msg.createdAt ? new Date(msg.createdAt) : new Date(),
-      ]
-    );
+    let res;
+    try {
+      res = await pool.query(
+        `INSERT INTO campaign_messages (
+          id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+          provider_message_id, template_name, template_language,
+          error_code, error_title, error_message, error_details, business_id, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+        ON CONFLICT (id) DO UPDATE SET
+          status = EXCLUDED.status,
+          provider_message_id = COALESCE(EXCLUDED.provider_message_id, campaign_messages.provider_message_id),
+          template_name = COALESCE(EXCLUDED.template_name, campaign_messages.template_name),
+          template_language = COALESCE(EXCLUDED.template_language, campaign_messages.template_language),
+          error_code = COALESCE(EXCLUDED.error_code, campaign_messages.error_code),
+          error_title = COALESCE(EXCLUDED.error_title, campaign_messages.error_title),
+          error_message = COALESCE(EXCLUDED.error_message, campaign_messages.error_message),
+          error_details = COALESCE(EXCLUDED.error_details, campaign_messages.error_details),
+          business_id = COALESCE(EXCLUDED.business_id, campaign_messages.business_id),
+          updated_at = NOW()
+        RETURNING id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                  provider_message_id, template_name, template_language,
+                  error_code, error_title, error_message, error_details, business_id, created_at, updated_at;`,
+        [
+          msg.id,
+          msg.campaignId,
+          msg.localCustomerId,
+          msg.recipientName,
+          msg.normalizedPhone,
+          msg.status,
+          msg.providerMessageId || null,
+          msg.templateName || null,
+          msg.templateLanguage || null,
+          msg.errorCode || null,
+          msg.errorTitle || null,
+          msg.errorMessage || null,
+          msg.errorDetails || null,
+          msg.businessId || null,
+          msg.createdAt ? new Date(msg.createdAt) : new Date(),
+        ]
+      );
+    } catch (err: any) {
+      if (err.code === '42703') {
+        if (msg.businessId && msg.businessId !== INITIAL_BUSINESS_ID) {
+          throw new Error('Multi-business schema migration required for non-initial business message saving.');
+        }
+        res = await pool.query(
+          `INSERT INTO campaign_messages (
+            id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+            provider_message_id, template_name, template_language,
+            error_code, error_title, error_message, error_details, created_at, updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+          ON CONFLICT (id) DO UPDATE SET
+            status = EXCLUDED.status,
+            provider_message_id = COALESCE(EXCLUDED.provider_message_id, campaign_messages.provider_message_id),
+            template_name = COALESCE(EXCLUDED.template_name, campaign_messages.template_name),
+            template_language = COALESCE(EXCLUDED.template_language, campaign_messages.template_language),
+            error_code = COALESCE(EXCLUDED.error_code, campaign_messages.error_code),
+            error_title = COALESCE(EXCLUDED.error_title, campaign_messages.error_title),
+            error_message = COALESCE(EXCLUDED.error_message, campaign_messages.error_message),
+            error_details = COALESCE(EXCLUDED.error_details, campaign_messages.error_details),
+            updated_at = NOW()
+          RETURNING id, campaign_id, local_customer_id, recipient_name, normalized_phone, status,
+                    provider_message_id, template_name, template_language,
+                    error_code, error_title, error_message, error_details, created_at, updated_at;`,
+          [
+            msg.id,
+            msg.campaignId,
+            msg.localCustomerId,
+            msg.recipientName,
+            msg.normalizedPhone,
+            msg.status,
+            msg.providerMessageId || null,
+            msg.templateName || null,
+            msg.templateLanguage || null,
+            msg.errorCode || null,
+            msg.errorTitle || null,
+            msg.errorMessage || null,
+            msg.errorDetails || null,
+            msg.createdAt ? new Date(msg.createdAt) : new Date(),
+          ]
+        );
+      } else {
+        throw err;
+      }
+    }
 
     return this.mapRowToMessage(res.rows[0]);
   }
@@ -345,6 +416,7 @@ export class MessageStore {
     return {
       id: row.id,
       campaignId: row.campaign_id,
+      businessId: row.business_id || undefined,
       localCustomerId: row.local_customer_id,
       recipientName: row.recipient_name,
       normalizedPhone: row.normalized_phone,

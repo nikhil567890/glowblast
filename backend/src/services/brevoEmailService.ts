@@ -189,4 +189,99 @@ Security Note: If you did not request this code, you can safely ignore this emai
       };
     }
   }
+
+  /**
+   * Sends a team invitation email containing the invitation token and details.
+   */
+  static async sendTeamInvitationEmail(params: {
+    toEmail: string;
+    businessName: string;
+    inviterName: string;
+    role: 'admin' | 'staff';
+    token: string;
+  }): Promise<SendEmailResult> {
+    const { toEmail, businessName, inviterName, role, token } = params;
+    const masked = maskEmail(toEmail);
+
+    if (!env.BREVO_API_KEY || !env.BREVO_SENDER_EMAIL) {
+      console.warn(`[Brevo] BREVO_API_KEY or BREVO_SENDER_EMAIL not configured. Cannot send invitation email to ${masked}.`);
+      if (env.NODE_ENV === 'test' || env.NODE_ENV === 'development') {
+        console.log(`[Brevo Test Mode] Simulated invitation dispatch to ${masked} for ${businessName} succeeded.`);
+        return { success: true, messageId: 'simulated_test_invitation_msg_id' };
+      }
+      return {
+        success: false,
+        error: 'Unable to send invitation email. Please contact support.',
+      };
+    }
+
+    const senderName = env.BREVO_SENDER_NAME || 'GlowBlast';
+    const senderEmail = env.BREVO_SENDER_EMAIL;
+
+    const htmlContent = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>You're invited to join ${businessName} on GlowBlast</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #121A15; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #FFFFFF;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color: #121A15; padding: 36px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width: 520px; background-color: #1B2620; border-radius: 16px; border: 1px solid rgba(212, 175, 55, 0.2); padding: 32px 28px;">
+          <tr>
+            <td>
+              <h2 style="margin: 0 0 16px; font-size: 20px; color: #FFFFFF;">You've been invited!</h2>
+              <p style="margin: 0 0 20px; font-size: 14px; line-height: 1.6; color: rgba(255, 255, 255, 0.8);">
+                <strong>${inviterName}</strong> has invited you to join <strong>${businessName}</strong> as a <strong>${role.toUpperCase()}</strong> on GlowBlast.
+              </p>
+              <div style="background-color: #121A15; border-radius: 12px; padding: 18px; border: 1px solid rgba(212, 175, 55, 0.3); margin-bottom: 24px; text-align: center;">
+                <p style="margin: 0 0 8px; font-size: 12px; color: #D4AF37; text-transform: uppercase; letter-spacing: 1px;">Your Invitation Token</p>
+                <p style="margin: 0; font-family: monospace; font-size: 16px; color: #FFFFFF; word-break: break-all;">${token}</p>
+              </div>
+              <p style="margin: 0; font-size: 12px; color: rgba(255, 255, 255, 0.5);">
+                This invitation is valid for 7 days. Sign in to your verified account (${toEmail}) in the GlowBlast app to accept.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+    `;
+
+    const textContent = `You have been invited by ${inviterName} to join ${businessName} as a ${role.toUpperCase()} on GlowBlast.\n\nYour invitation token: ${token}\n\nThis invitation is valid for 7 days. Sign in with ${toEmail} to accept.`;
+
+    try {
+      const response = await fetch(BrevoEmailService.BREVO_API_URL, {
+        method: 'POST',
+        headers: {
+          'api-key': env.BREVO_API_KEY,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          sender: { name: senderName, email: senderEmail },
+          to: [{ email: toEmail, name: toEmail.split('@')[0] }],
+          subject: `Invitation to join ${businessName} on GlowBlast`,
+          htmlContent,
+          textContent,
+        }),
+      });
+
+      if (!response.ok) {
+        return { success: false, error: 'Unable to send invitation email.' };
+      }
+
+      const data = (await response.json()) as { messageId?: string };
+      console.log(`[Brevo] Invitation email successfully sent to ${masked}.`);
+      return { success: true, messageId: data.messageId };
+    } catch (err: any) {
+      console.error(`[Brevo] Network error sending invitation to ${masked}:`, err.message);
+      return { success: false, error: 'Unable to send invitation email.' };
+    }
+  }
 }

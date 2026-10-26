@@ -7,6 +7,7 @@ import { env } from '../src/config/env';
 import { WebhookService } from '../src/services/webhookService';
 import { campaignStore } from '../src/store/campaignStore';
 import { messageStore } from '../src/store/messageStore';
+import { businessStore } from '../src/store/businessStore';
 
 describe('Bulk Customer Deletion & Verified Reply Analytics Suite', () => {
   const pool = getPool();
@@ -15,6 +16,28 @@ describe('Bulk Customer Deletion & Verified Reply Analytics Suite', () => {
   let baseUrl: string;
 
   before(async () => {
+    // Set up mock business membership for test admin user
+    businessStore.setMockBusiness({
+      id: 'a0000000-0000-4000-8000-000000000001',
+      slug: 'initial-spa',
+      displayName: 'Flagship Spa',
+      ownerUserId: 'usr_admin_test',
+      timezone: 'Asia/Kolkata',
+      isActive: true,
+      productionEnabled: true,
+      dailyRecipientLimit: 200,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    businessStore.setMockMember({
+      id: 'mem_admin_test',
+      businessId: 'a0000000-0000-4000-8000-000000000001',
+      userId: 'usr_admin_test',
+      role: 'owner',
+      joinedAt: new Date(),
+      updatedAt: new Date(),
+    });
+
     // Generate valid admin token
     adminToken = jwt.sign(
       { sub: 'usr_admin_test', email: 'owner@spa.com', role: 'admin' },
@@ -40,6 +63,7 @@ describe('Bulk Customer Deletion & Verified Reply Analytics Suite', () => {
   });
 
   after(async () => {
+    businessStore.clearMock();
     if (server) {
       server.close();
     }

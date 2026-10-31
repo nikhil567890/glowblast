@@ -3,48 +3,71 @@ import { getPool } from '../db/pool';
 import { User, SafeUser, OtpRecord } from '../types/auth';
 
 export class UserStore {
+  private mockUsers = new Map<string, User>();
+
+  public setMockUser(user: User): void {
+    this.mockUsers.set(user.id, user);
+    this.mockUsers.set(user.email.toLowerCase(), user);
+  }
+
+  public clearMock(): void {
+    this.mockUsers.clear();
+  }
+
   public async findByEmail(email: string): Promise<User | undefined> {
     const normalized = email.trim().toLowerCase();
+    const mock = this.mockUsers.get(normalized);
+    if (mock) return mock;
+
     const pool = getPool();
-    const res = await pool.query<{
-      id: string;
-      email: string;
-      password_hash: string;
-      name: string;
-      business_name: string | null;
-      phone: string | null;
-      email_verified: boolean;
-      created_at: Date;
-      updated_at: Date;
-      last_login_at: Date | null;
-    }>(
-      `SELECT id, email, password_hash, name, business_name, phone, email_verified,
-              created_at, updated_at, last_login_at
-       FROM users
-       WHERE LOWER(email) = $1
-       LIMIT 1;`,
-      [normalized]
-    );
+    try {
+      const res = await pool.query<{
+        id: string;
+        email: string;
+        password_hash: string;
+        name: string;
+        business_name: string | null;
+        phone: string | null;
+        email_verified: boolean;
+        created_at: Date;
+        updated_at: Date;
+        last_login_at: Date | null;
+      }>(
+        `SELECT id, email, password_hash, name, business_name, phone, email_verified,
+                created_at, updated_at, last_login_at
+         FROM users
+         WHERE LOWER(email) = $1
+         LIMIT 1;`,
+        [normalized]
+      );
 
-    if (res.rows.length === 0) return undefined;
-    const row = res.rows[0];
+      if (res.rows.length === 0) return undefined;
+      const row = res.rows[0];
 
-    return {
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      passwordHash: row.password_hash,
-      businessName: row.business_name || undefined,
-      phone: row.phone || undefined,
-      emailVerified: row.email_verified,
-      createdAt: row.created_at.toISOString(),
-      updatedAt: row.updated_at.toISOString(),
-      lastLoginAt: row.last_login_at?.toISOString() || undefined,
-    };
+      return {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        passwordHash: row.password_hash,
+        businessName: row.business_name || undefined,
+        phone: row.phone || undefined,
+        emailVerified: row.email_verified,
+        createdAt: row.created_at.toISOString(),
+        updatedAt: row.updated_at.toISOString(),
+        lastLoginAt: row.last_login_at?.toISOString() || undefined,
+      };
+    } catch (err: any) {
+      if (err.code === '42P01') return undefined;
+      throw err;
+    }
   }
 
   public async findById(id: string): Promise<User | undefined> {
+    const mock = this.mockUsers.get(id);
+    if (mock) return mock;
+
     const pool = getPool();
+    try {
     const res = await pool.query<{
       id: string;
       email: string;
@@ -68,18 +91,22 @@ export class UserStore {
     if (res.rows.length === 0) return undefined;
     const row = res.rows[0];
 
-    return {
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      passwordHash: row.password_hash,
-      businessName: row.business_name || undefined,
-      phone: row.phone || undefined,
-      emailVerified: row.email_verified,
-      createdAt: row.created_at.toISOString(),
-      updatedAt: row.updated_at.toISOString(),
-      lastLoginAt: row.last_login_at?.toISOString() || undefined,
-    };
+      return {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        passwordHash: row.password_hash,
+        businessName: row.business_name || undefined,
+        phone: row.phone || undefined,
+        emailVerified: row.email_verified,
+        createdAt: row.created_at.toISOString(),
+        updatedAt: row.updated_at.toISOString(),
+        lastLoginAt: row.last_login_at?.toISOString() || undefined,
+      };
+    } catch (err: any) {
+      if (err.code === '42P01') return undefined;
+      throw err;
+    }
   }
 
   public async saveUser(user: User): Promise<User> {

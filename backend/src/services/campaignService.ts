@@ -14,6 +14,8 @@ import { consentStore } from '../store/consentStore';
 import { WhatsAppService, WhatsAppCredentials } from './whatsappService';
 import { realtimeService } from './realtimeService';
 import { getPool } from '../db/pool';
+import { INITIAL_BUSINESS_ID } from '../middleware/authMiddleware';
+import { resolveBusinessWhatsAppCredentials } from './credentialResolver';
 
 export class CampaignService {
   /**
@@ -68,41 +70,60 @@ export class CampaignService {
     }
 
     const templateLookupKey = templateId || templateName;
-    const template = await templateStore.findByIdOrName(templateLookupKey, mode);
+    const template = await templateStore.findByIdOrName(templateLookupKey, mode, undefined, req.businessId || undefined);
 
     let effectiveMetaTemplateName = templateName.trim();
     let finalTemplateLanguage = effectiveTemplateLanguage;
     let finalVariables = [...effectiveVariables];
 
-    // Mode-specific credential & authorization routing
+    const effectiveBizId = req.businessId || INITIAL_BUSINESS_ID;
+
+    // Production Safety Check 1: Kill-switch (ENABLE_PRODUCTION_CAMPAIGNS)
+    if (mode === 'production' && !env.ENABLE_PRODUCTION_CAMPAIGNS) {
+      console.warn(`[Campaign] Rejected: reason=PRODUCTION_MODE_DISABLED`);
+      return {
+        success: false,
+        error: {
+          code: 'PRODUCTION_MODE_DISABLED',
+          message:
+            'Live production broadcasts are currently disabled on the backend (ENABLE_PRODUCTION_CAMPAIGNS=false).',
+        },
+      };
+    }
+
+    // Resolve credentials through verified business context
     let targetCredentials: WhatsAppCredentials;
+    try {
+      const resolved = await resolveBusinessWhatsAppCredentials(effectiveBizId, mode);
+      targetCredentials = {
+        phoneNumberId: resolved.phoneNumberId,
+        accessToken: resolved.accessToken,
+      };
+    } catch (credErr: any) {
+      console.warn(`[Campaign] Credential resolution failed for business ${effectiveBizId}: ${credErr.message}`);
+      return {
+        success: false,
+        error: {
+          code: credErr.code || 'WHATSAPP_CONNECTION_NOT_CONFIGURED',
+          message: credErr.message,
+        },
+      };
+    }
+
     let normalizedConsentedPhones: string[] = [];
 
     if (mode === 'production') {
       // --- PRODUCTION SAFETY CHECKS ---
 
-      // Production Safety Check 1: Kill-switch (ENABLE_PRODUCTION_CAMPAIGNS)
-      if (!env.ENABLE_PRODUCTION_CAMPAIGNS) {
-        console.warn(`[Campaign] Rejected: reason=PRODUCTION_MODE_DISABLED`);
-        return {
-          success: false,
-          error: {
-            code: 'PRODUCTION_MODE_DISABLED',
-            message:
-              'Live production broadcasts are currently disabled on the backend (ENABLE_PRODUCTION_CAMPAIGNS=false).',
-          },
-        };
-      }
-
       // Production Safety Check 2: Production Credentials presence
-      if (!isProductionConfigured()) {
+      if (!targetCredentials.phoneNumberId || !targetCredentials.accessToken) {
         console.warn(`[Campaign] Rejected: reason=PRODUCTION_CREDENTIALS_MISSING`);
         return {
           success: false,
           error: {
             code: 'PRODUCTION_CREDENTIALS_MISSING',
             message:
-              'Production WhatsApp credentials (PROD_WHATSAPP_PHONE_NUMBER_ID, PROD_WHATSAPP_ACCESS_TOKEN) are not fully configured in server environment.',
+              'Production WhatsApp credentials are not fully configured for this business.',
           },
         };
       }
@@ -161,7 +182,7 @@ export class CampaignService {
         const norm = normalizeWhatsAppPhone(r.phone);
         if (!norm) continue;
         if (optedOutPhones.includes(norm) || normalizedOptedOut.has(norm)) continue;
-        const hasConsent = await consentStore.hasActiveConsent(norm, requiredConsentCategory);
+        const hasConsent = await consentStore.hasActiveConsent(norm, requiredConsentCategory, req.businessId || undefined);
         if (hasConsent) {
           normalizedConsentedPhones.push(norm);
         }
@@ -183,11 +204,6 @@ export class CampaignService {
           },
         };
       }
-
-      targetCredentials = {
-        phoneNumberId: env.PROD_WHATSAPP_PHONE_NUMBER_ID,
-        accessToken: env.PROD_WHATSAPP_ACCESS_TOKEN,
-      };
     } else {
       // --- DEVELOPER TEST MODE CHECKS ---
 
@@ -234,11 +250,6 @@ export class CampaignService {
           },
         };
       }
-
-      targetCredentials = {
-        phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID,
-        accessToken: env.WHATSAPP_ACCESS_TOKEN,
-      };
     }
 
     const allowlist = mode === 'test' ? getAuthorizedTestRecipients() : [];
@@ -298,29 +309,67 @@ export class CampaignService {
       await client.query('BEGIN');
 
       // 1. Insert campaign with ON CONFLICT (client_request_token) DO NOTHING
-      const insertRes = await client.query<{ campaign_id: string; status: string }>(
-        `INSERT INTO campaigns (
-           campaign_id, client_request_token, campaign_name, mode, status,
-           template_name, template_language, total_recipients,
-           count_queued, count_accepted, count_sent, count_delivered,
-           count_read, count_failed, count_excluded_opt_out,
-           created_at, updated_at
-         )
-         VALUES ($1, $2, $3, $4, 'processing', $5, $6, $7, $8, 0, 0, 0, 0, 0, $9, NOW(), NOW())
-         ON CONFLICT (client_request_token) DO NOTHING
-         RETURNING campaign_id, status;`,
-        [
-          effectiveCampaignId,
-          clientRequestToken,
-          effectiveCampaignName,
-          mode,
-          effectiveMetaTemplateName,
-          finalTemplateLanguage,
-          recipients.length,
-          queuedCount,
-          excludedOptOutCount,
-        ]
-      );
+      let insertRes;
+      await client.query('SAVEPOINT sp_insert_campaign');
+      try {
+        insertRes = await client.query<{ campaign_id: string; status: string }>(
+          `INSERT INTO campaigns (
+             campaign_id, client_request_token, campaign_name, mode, status,
+             template_name, template_language, total_recipients,
+             count_queued, count_accepted, count_sent, count_delivered,
+             count_read, count_failed, count_excluded_opt_out,
+             business_id, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, 'processing', $5, $6, $7, $8, 0, 0, 0, 0, 0, $9, $10, NOW(), NOW())
+           ON CONFLICT (client_request_token) DO NOTHING
+           RETURNING campaign_id, status;`,
+          [
+            effectiveCampaignId,
+            clientRequestToken,
+            effectiveCampaignName,
+            mode,
+            effectiveMetaTemplateName,
+            finalTemplateLanguage,
+            recipients.length,
+            queuedCount,
+            excludedOptOutCount,
+            effectiveBizId,
+          ]
+        );
+        await client.query('RELEASE SAVEPOINT sp_insert_campaign');
+      } catch (colErr: any) {
+        await client.query('ROLLBACK TO SAVEPOINT sp_insert_campaign');
+        if (colErr.code === '42703') {
+          if (req.businessId && req.businessId !== INITIAL_BUSINESS_ID) {
+            throw new Error('Multi-business schema migration required for non-initial business campaign creation.');
+          }
+          insertRes = await client.query<{ campaign_id: string; status: string }>(
+            `INSERT INTO campaigns (
+               campaign_id, client_request_token, campaign_name, mode, status,
+               template_name, template_language, total_recipients,
+               count_queued, count_accepted, count_sent, count_delivered,
+               count_read, count_failed, count_excluded_opt_out,
+               created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, 'processing', $5, $6, $7, $8, 0, 0, 0, 0, 0, $9, NOW(), NOW())
+             ON CONFLICT (client_request_token) DO NOTHING
+             RETURNING campaign_id, status;`,
+            [
+              effectiveCampaignId,
+              clientRequestToken,
+              effectiveCampaignName,
+              mode,
+              effectiveMetaTemplateName,
+              finalTemplateLanguage,
+              recipients.length,
+              queuedCount,
+              excludedOptOutCount,
+            ]
+          );
+        } else {
+          throw colErr;
+        }
+      }
 
       if (insertRes.rows.length === 0) {
         // Token conflict! Roll back this transaction immediately
@@ -329,11 +378,11 @@ export class CampaignService {
 
         console.log(`[Campaign] Idempotent hit: client_request_token='${clientRequestToken}'`);
         // In a separate query, retrieve existing campaign
-        let existingCamp = await campaignStore.getByClientRequestToken(clientRequestToken);
+        let existingCamp = await campaignStore.getByClientRequestToken(clientRequestToken, req.businessId || undefined);
         if (!existingCamp) {
           for (let attempt = 0; attempt < 5; attempt++) {
             await new Promise((r) => setTimeout(r, 100));
-            existingCamp = await campaignStore.getByClientRequestToken(clientRequestToken);
+            existingCamp = await campaignStore.getByClientRequestToken(clientRequestToken, req.businessId || undefined);
             if (existingCamp) break;
           }
         }
@@ -388,35 +437,80 @@ export class CampaignService {
         }
 
         for (const phone of normalizedConsentedPhones) {
-          await client.query(
-            `INSERT INTO recipient_reservations (campaign_id, normalized_phone, reserved_at)
-             VALUES ($1, $2, NOW())
-             ON CONFLICT (campaign_id, normalized_phone) DO NOTHING;`,
-            [effectiveCampaignId, phone]
-          );
+          await client.query('SAVEPOINT sp_insert_res');
+          try {
+            await client.query(
+              `INSERT INTO recipient_reservations (campaign_id, normalized_phone, business_id, reserved_at)
+               VALUES ($1, $2, $3, NOW())
+               ON CONFLICT (campaign_id, normalized_phone) DO NOTHING;`,
+              [effectiveCampaignId, phone, effectiveBizId]
+            );
+            await client.query('RELEASE SAVEPOINT sp_insert_res');
+          } catch (colErr: any) {
+            await client.query('ROLLBACK TO SAVEPOINT sp_insert_res');
+            if (colErr.code === '42703') {
+              await client.query(
+                `INSERT INTO recipient_reservations (campaign_id, normalized_phone, reserved_at)
+                 VALUES ($1, $2, NOW())
+                 ON CONFLICT (campaign_id, normalized_phone) DO NOTHING;`,
+                [effectiveCampaignId, phone]
+              );
+            } else {
+              throw colErr;
+            }
+          }
         }
       }
 
       // 3. Insert eligible queued message records and excluded-recipient records
       for (const msg of storedMessages) {
-        await client.query(
-          `INSERT INTO campaign_messages (
-             id, campaign_id, local_customer_id, recipient_name, normalized_phone,
-             status, template_name, template_language, created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
-           ON CONFLICT (id) DO NOTHING;`,
-          [
-            msg.id,
-            msg.campaignId,
-            msg.localCustomerId,
-            msg.recipientName,
-            msg.normalizedPhone,
-            msg.status,
-            msg.templateName,
-            msg.templateLanguage,
-          ]
-        );
+        await client.query('SAVEPOINT sp_insert_msg');
+        try {
+          await client.query(
+            `INSERT INTO campaign_messages (
+               id, campaign_id, local_customer_id, recipient_name, normalized_phone,
+               status, template_name, template_language, business_id, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING;`,
+            [
+              msg.id,
+              msg.campaignId,
+              msg.localCustomerId,
+              msg.recipientName,
+              msg.normalizedPhone,
+              msg.status,
+              msg.templateName,
+              msg.templateLanguage,
+              effectiveBizId,
+            ]
+          );
+          await client.query('RELEASE SAVEPOINT sp_insert_msg');
+        } catch (colErr: any) {
+          await client.query('ROLLBACK TO SAVEPOINT sp_insert_msg');
+          if (colErr.code === '42703') {
+            await client.query(
+              `INSERT INTO campaign_messages (
+                 id, campaign_id, local_customer_id, recipient_name, normalized_phone,
+                 status, template_name, template_language, created_at, updated_at
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+               ON CONFLICT (id) DO NOTHING;`,
+              [
+                msg.id,
+                msg.campaignId,
+                msg.localCustomerId,
+                msg.recipientName,
+                msg.normalizedPhone,
+                msg.status,
+                msg.templateName,
+                msg.templateLanguage,
+              ]
+            );
+          } else {
+            throw colErr;
+          }
+        }
       }
 
       // 4. Set campaign counts to match records actually inserted
@@ -459,11 +553,12 @@ export class CampaignService {
 
     let createdCampaign: StoredCampaign | undefined;
     try {
-      createdCampaign = await campaignStore.get(effectiveCampaignId);
+      createdCampaign = await campaignStore.get(effectiveCampaignId, req.businessId || undefined);
     } catch (err: any) {
       console.error(`[Campaign] Safe fallback: Error retrieving created campaign ${effectiveCampaignId}: ${err.message}`);
       createdCampaign = {
         campaignId: effectiveCampaignId,
+        businessId: req.businessId || undefined,
         clientRequestToken,
         campaignName: effectiveCampaignName,
         status: 'processing',
@@ -489,6 +584,7 @@ export class CampaignService {
       setImmediate(() => {
         this.executeCampaignSend({
           campaignId: effectiveCampaignId,
+          businessId: req.businessId || undefined,
           templateName: effectiveMetaTemplateName,
           templateLanguage: finalTemplateLanguage,
           variables: finalVariables,
@@ -515,6 +611,7 @@ export class CampaignService {
    */
   private static async executeCampaignSend(params: {
     campaignId: string;
+    businessId?: string;
     templateName: string;
     templateLanguage: string;
     variables: string[];
@@ -536,6 +633,7 @@ export class CampaignService {
   }) {
     const {
       campaignId,
+      businessId,
       templateName,
       templateLanguage,
       variables,
@@ -598,7 +696,7 @@ export class CampaignService {
       if (mode === 'production') {
         const requiredConsentCategory: 'marketing' | 'utility' =
           (templateRef?.category || '').toUpperCase() === 'UTILITY' ? 'utility' : 'marketing';
-        const hasServerConsent = await consentStore.hasActiveConsent(claimed.normalizedPhone, requiredConsentCategory);
+        const hasServerConsent = await consentStore.hasActiveConsent(claimed.normalizedPhone, requiredConsentCategory, businessId);
         if (!hasServerConsent) {
           console.warn(
             `[Campaign] Skipping ${maskPhone(claimed.normalizedPhone)}: Missing verified server-side ${requiredConsentCategory} opt-in consent`

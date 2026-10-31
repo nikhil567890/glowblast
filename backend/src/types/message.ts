@@ -18,6 +18,7 @@ export interface RecipientInput {
 export interface StoredMessage {
   id: string; // Internal message ID: e.g. campaignId_localCustomerId
   campaignId: string;
+  businessId?: string;
   localCustomerId: string;
   recipientName: string;
   normalizedPhone: string;

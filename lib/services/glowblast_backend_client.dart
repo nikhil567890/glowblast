@@ -3,6 +3,9 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../core/constants/api_constants.dart';
+import '../data/models/business_membership.dart';
+import '../data/models/business_member.dart';
+import '../data/models/business_invitation.dart';
 
 class BackendHealthStatus {
   final bool isOnline;
@@ -79,17 +82,80 @@ class BackendWhatsAppStatus {
   }
 }
 
+class BusinessWabaConnection {
+  final String id;
+  final String businessId;
+  final String wabaId;
+  final String phoneNumberId;
+  final String? displayNumber;
+  final String mode;
+  final bool isActive;
+  final String? verifiedName;
+  final String? qualityRating;
+  final String? source;
+  final DateTime? createdAt;
+
+  const BusinessWabaConnection({
+    required this.id,
+    required this.businessId,
+    required this.wabaId,
+    required this.phoneNumberId,
+    this.displayNumber,
+    required this.mode,
+    required this.isActive,
+    this.verifiedName,
+    this.qualityRating,
+    this.source,
+    this.createdAt,
+  });
+
+  factory BusinessWabaConnection.fromJson(Map<String, dynamic> json, {String? source}) {
+    return BusinessWabaConnection(
+      id: json['id']?.toString() ?? '',
+      businessId: json['businessId']?.toString() ?? '',
+      wabaId: json['wabaId']?.toString() ?? '',
+      phoneNumberId: json['phoneNumberId']?.toString() ?? '',
+      displayNumber: json['displayNumber']?.toString(),
+      mode: json['mode']?.toString() ?? 'test',
+      isActive: json['isActive'] == true || json['connected'] == true,
+      verifiedName: json['verifiedName']?.toString(),
+      qualityRating: json['qualityRating']?.toString(),
+      source: source ?? json['source']?.toString(),
+      createdAt: json['createdAt'] != null
+          ? DateTime.tryParse(json['createdAt'].toString())
+          : null,
+    );
+  }
+}
+
 class GlowBlastBackendClient {
   final String baseUrl;
   final http.Client _httpClient;
   String? authToken;
+  String? activeBusinessId;
 
   GlowBlastBackendClient({
     required String baseUrl,
     http.Client? httpClient,
     this.authToken,
+    this.activeBusinessId,
   })  : baseUrl = ApiConstants.normalizeBackendUrl(baseUrl),
         _httpClient = httpClient ?? http.Client();
+
+  Map<String, String> _buildHeaders([String? token, Map<String, String>? extra]) {
+    final effectiveToken = token ?? authToken;
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
+        'Authorization': 'Bearer ${effectiveToken.trim()}',
+      if (activeBusinessId != null && activeBusinessId!.trim().isNotEmpty)
+        'X-Business-Id': activeBusinessId!.trim(),
+    };
+    if (extra != null) {
+      headers.addAll(extra);
+    }
+    return headers;
+  }
 
   Uri _uri(String path) {
     var cleanBase = baseUrl.trim();
@@ -257,13 +323,7 @@ class GlowBlastBackendClient {
     if (metadata != null) {
       payload['metadata'] = metadata;
     }
-
-    final effectiveToken = token ?? authToken;
-    final headers = <String, String>{
-      'Content-Type': 'application/json',
-      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
-        'Authorization': 'Bearer ${effectiveToken.trim()}',
-    };
+    final headers = _buildHeaders(token);
 
     try {
       final response = await _httpClient
@@ -306,12 +366,13 @@ class GlowBlastBackendClient {
     String templateLanguage = 'en_US',
     List<String>? templateVariables,
     List<Map<String, dynamic>>? templateComponents,
+    String? token,
   }) async {
     try {
       final response = await _httpClient
           .post(
             _uri('/api/messages/send'),
-            headers: {'Content-Type': 'application/json'},
+            headers: _buildHeaders(token),
             body: jsonEncode({
               'phone': phone,
               'name': name,
@@ -342,11 +403,11 @@ class GlowBlastBackendClient {
   }
 
   /// Fetches all registered WhatsApp templates from backend.
-  Future<List<Map<String, dynamic>>> getTemplates({String? mode}) async {
+  Future<List<Map<String, dynamic>>> getTemplates({String? mode, String? token}) async {
     try {
       final query = mode != null ? '?mode=$mode' : '';
       final response = await _httpClient
-          .get(_uri('/api/templates$query'))
+          .get(_uri('/api/templates$query'), headers: _buildHeaders(token))
           .timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -361,12 +422,12 @@ class GlowBlastBackendClient {
   }
 
   /// Synchronizes templates with Meta WhatsApp Business Account (?mode=test|production).
-  Future<Map<String, dynamic>> syncTemplates({String mode = 'test'}) async {
+  Future<Map<String, dynamic>> syncTemplates({String mode = 'test', String? token}) async {
     try {
       final response = await _httpClient
           .post(
             _uri('/api/templates/sync?mode=$mode'),
-            headers: {'Content-Type': 'application/json'},
+            headers: _buildHeaders(token),
           )
           .timeout(const Duration(seconds: 15));
       final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -397,12 +458,13 @@ class GlowBlastBackendClient {
     List<String>? variables,
     Map<String, String>? exampleValues,
     bool submitToMeta = false,
+    String? token,
   }) async {
     try {
       final response = await _httpClient
           .post(
             _uri('/api/templates'),
-            headers: {'Content-Type': 'application/json'},
+            headers: _buildHeaders(token),
             body: jsonEncode({
               'name': name,
               'displayName': displayName,
@@ -434,18 +496,18 @@ class GlowBlastBackendClient {
     }
   }
 
-
   /// Updates local approval status of a template.
   Future<Map<String, dynamic>> updateTemplateStatus({
     required String id,
     required String status,
     String? metaStatus,
+    String? token,
   }) async {
     try {
       final response = await _httpClient
           .put(
             _uri('/api/templates/$id/status'),
-            headers: {'Content-Type': 'application/json'},
+            headers: _buildHeaders(token),
             body: jsonEncode({
               'status': status,
               'metaStatus': metaStatus,
@@ -471,10 +533,10 @@ class GlowBlastBackendClient {
   }
 
   /// Gets the current authoritative campaign status counters.
-  Future<Map<String, dynamic>?> getCampaignStatus(String campaignId) async {
+  Future<Map<String, dynamic>?> getCampaignStatus(String campaignId, {String? token}) async {
     try {
       final response = await _httpClient
-          .get(_uri('/api/campaigns/$campaignId/status'))
+          .get(_uri('/api/campaigns/$campaignId/status'), headers: _buildHeaders(token))
           .timeout(const Duration(seconds: 8));
       if (response.statusCode == 200) {
         final decoded = jsonDecode(response.body) as Map<String, dynamic>;
@@ -491,10 +553,10 @@ class GlowBlastBackendClient {
   }
 
   /// Gets full campaign details including per-recipient message results and errors.
-  Future<Map<String, dynamic>?> getCampaignDetails(String campaignId) async {
+  Future<Map<String, dynamic>?> getCampaignDetails(String campaignId, {String? token}) async {
     try {
       final response = await _httpClient
-          .get(_uri('/api/campaigns/$campaignId'))
+          .get(_uri('/api/campaigns/$campaignId'), headers: _buildHeaders(token))
           .timeout(const Duration(seconds: 8));
       if (response.statusCode == 200) {
         return jsonDecode(response.body) as Map<String, dynamic>;
@@ -505,11 +567,16 @@ class GlowBlastBackendClient {
     }
   }
 
-
   /// Connects to the SSE event stream for live campaign progress and status events.
-  Stream<Map<String, dynamic>> connectToCampaignEvents(String campaignId) async* {
+  Stream<Map<String, dynamic>> connectToCampaignEvents(String campaignId, {String? token}) async* {
     final client = http.Client();
-    final request = http.Request('GET', _uri('/api/campaigns/$campaignId/events'));
+    final effectiveToken = token ?? authToken;
+    final query = effectiveToken != null && effectiveToken.isNotEmpty ? '?token=$effectiveToken' : '';
+    final request = http.Request('GET', _uri('/api/campaigns/$campaignId/events$query'));
+    final headers = _buildHeaders(token);
+    headers.forEach((key, value) {
+      request.headers[key] = value;
+    });
     request.headers['Accept'] = 'text/event-stream';
     request.headers['Cache-Control'] = 'no-cache';
 
@@ -754,12 +821,7 @@ class GlowBlastBackendClient {
     bool? allowOptOutOverride,
     String? token,
   }) async {
-    final effectiveToken = token ?? authToken;
-    final headers = <String, String>{
-      'Content-Type': 'application/json',
-      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
-        'Authorization': 'Bearer ${effectiveToken.trim()}',
-    };
+    final headers = _buildHeaders(token);
 
     try {
       final response = await _httpClient
@@ -806,11 +868,7 @@ class GlowBlastBackendClient {
     String? category,
     String? token,
   }) async {
-    final effectiveToken = token ?? authToken;
-    final headers = <String, String>{
-      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
-        'Authorization': 'Bearer ${effectiveToken.trim()}',
-    };
+    final headers = _buildHeaders(token);
 
     try {
       final query = category != null ? '?category=$category' : '';
@@ -845,12 +903,7 @@ class GlowBlastBackendClient {
     String category = 'marketing',
     String? token,
   }) async {
-    final effectiveToken = token ?? authToken;
-    final headers = <String, String>{
-      'Content-Type': 'application/json',
-      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
-        'Authorization': 'Bearer ${effectiveToken.trim()}',
-    };
+    final headers = _buildHeaders(token);
 
     try {
       final response = await _httpClient
@@ -890,11 +943,7 @@ class GlowBlastBackendClient {
     String? category,
     String? token,
   }) async {
-    final effectiveToken = token ?? authToken;
-    final headers = <String, String>{
-      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
-        'Authorization': 'Bearer ${effectiveToken.trim()}',
-    };
+    final headers = _buildHeaders(token);
 
     try {
       final query = category != null ? '?category=$category' : '';
@@ -922,12 +971,7 @@ class GlowBlastBackendClient {
     bool allowOptOutOverride = false,
     String? token,
   }) async {
-    final effectiveToken = token ?? authToken;
-    final headers = <String, String>{
-      'Content-Type': 'application/json',
-      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
-        'Authorization': 'Bearer ${effectiveToken.trim()}',
-    };
+    final headers = _buildHeaders(token);
 
     try {
       final response = await _httpClient
@@ -968,12 +1012,7 @@ class GlowBlastBackendClient {
     required List<String> customerIds,
     String? token,
   }) async {
-    final effectiveToken = token ?? authToken;
-    final headers = <String, String>{
-      'Content-Type': 'application/json',
-      if (effectiveToken != null && effectiveToken.trim().isNotEmpty)
-        'Authorization': 'Bearer ${effectiveToken.trim()}',
-    };
+    final headers = _buildHeaders(token);
 
     try {
       http.Response response = await _httpClient
@@ -1023,4 +1062,453 @@ class GlowBlastBackendClient {
       };
     }
   }
+
+  // ==========================================
+  // Multi-Business SaaS Endpoints
+  // ==========================================
+
+  /// Retrieves the list of businesses where the authenticated user is an active member.
+  Future<List<BusinessMembership>> getMyBusinesses({String? token}) async {
+    try {
+      final headers = _buildHeaders(token);
+      final response = await _httpClient
+          .get(_uri('/api/businesses'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data is Map && data['businesses'] is List) {
+          final list = data['businesses'] as List;
+          return list
+              .map((b) => BusinessMembership.fromJson(Map<String, dynamic>.from(b)))
+              .toList();
+        }
+      }
+      return [];
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[GlowBlastBackendClient] Failed to fetch businesses: $e');
+      }
+      return [];
+    }
+  }
+
+  /// Creates a new business and atomically assigns the user as its Owner.
+  Future<Map<String, dynamic>> createBusiness({
+    required String name,
+    required String slug,
+    String? phone,
+    String? email,
+    String timezone = 'UTC',
+    String? token,
+  }) async {
+    try {
+      final headers = _buildHeaders(token);
+      final response = await _httpClient
+          .post(
+            _uri('/api/businesses'),
+            headers: headers,
+            body: jsonEncode({
+              'name': name.trim(),
+              'slug': slug.trim().toLowerCase(),
+              if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
+              if (email != null && email.trim().isNotEmpty) 'email': email.trim().toLowerCase(),
+              'timezone': timezone.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      Map<String, dynamic> data = {};
+      try {
+        data = jsonDecode(response.body) as Map<String, dynamic>;
+      } catch (_) {}
+
+      final isSuccess = response.statusCode == 201 || response.statusCode == 200;
+      return {
+        'success': isSuccess,
+        'statusCode': response.statusCode,
+        ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'statusCode': 0,
+        'error': {
+          'code': 'NETWORK_ERROR',
+          'message': 'Failed to create business: $e',
+        },
+      };
+    }
+  }
+
+  /// Gets details of a specific business (verifying membership).
+  Future<Map<String, dynamic>?> getBusinessDetails(String businessId, {String? token}) async {
+    try {
+      final headers = _buildHeaders(token, {'X-Business-Id': businessId});
+      final response = await _httpClient
+          .get(_uri('/api/businesses/$businessId'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+
+  /// Retrieves WhatsApp connection for the active business.
+  Future<BusinessWabaConnection?> getBusinessWabaConnection({
+    String mode = 'test',
+    String? businessId,
+    String? token,
+  }) async {
+    final effectiveBiz = businessId ?? activeBusinessId;
+    if (effectiveBiz == null) return null;
+    final headers = _buildHeaders(token, {'X-Business-Id': effectiveBiz});
+
+    try {
+      final response = await _httpClient
+          .get(_uri('/api/whatsapp/connection?mode=$mode'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data is Map && data['connected'] == true && data['connection'] is Map) {
+          return BusinessWabaConnection.fromJson(
+            Map<String, dynamic>.from(data['connection']),
+            source: data['source']?.toString(),
+          );
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Connects or updates a WhatsApp Business Account connection for the active business.
+  Future<Map<String, dynamic>> connectBusinessWaba({
+    required String wabaId,
+    required String phoneNumberId,
+    required String accessToken,
+    String? displayNumber,
+    String mode = 'test',
+    String? verifiedName,
+    String? businessId,
+    String? token,
+  }) async {
+    final effectiveBiz = businessId ?? activeBusinessId;
+    final headers = _buildHeaders(token, effectiveBiz != null ? {'X-Business-Id': effectiveBiz} : null);
+
+    try {
+      final response = await _httpClient
+          .post(
+            _uri('/api/whatsapp/connection'),
+            headers: headers,
+            body: jsonEncode({
+              'wabaId': wabaId.trim(),
+              'phoneNumberId': phoneNumberId.trim(),
+              'accessToken': accessToken.trim(),
+              'displayNumber': displayNumber?.trim(),
+              'mode': mode,
+              'verifiedName': verifiedName?.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200 || response.statusCode == 201,
+        'statusCode': response.statusCode,
+        if (data is Map<String, dynamic>) ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {'message': e.toString()},
+      };
+    }
+  }
+
+  /// Disconnects WhatsApp connection for the active business.
+  Future<bool> disconnectBusinessWaba({
+    String mode = 'test',
+    String? businessId,
+    String? token,
+  }) async {
+    final effectiveBiz = businessId ?? activeBusinessId;
+    final headers = _buildHeaders(token, effectiveBiz != null ? {'X-Business-Id': effectiveBiz} : null);
+
+    try {
+      final response = await _httpClient
+          .delete(_uri('/api/whatsapp/connection?mode=$mode'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Phase 4: Team Management & Business Profile API Methods
+  // --------------------------------------------------------------------------
+
+  /// Lists all team members of the given or active business.
+  Future<List<BusinessMember>> getBusinessMembers({
+    String? businessId,
+    String? token,
+  }) async {
+    final effectiveBiz = businessId ?? activeBusinessId;
+    if (effectiveBiz == null) return [];
+    final headers = _buildHeaders(token, {'X-Business-Id': effectiveBiz});
+
+    try {
+      final response = await _httpClient
+          .get(_uri('/api/businesses/$effectiveBiz/members'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data is Map && data['members'] is List) {
+          return (data['members'] as List)
+              .map((m) => BusinessMember.fromJson(Map<String, dynamic>.from(m)))
+              .toList();
+        }
+      }
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Invites a new team member by email.
+  Future<Map<String, dynamic>> inviteBusinessMember({
+    required String email,
+    required String role,
+    String? businessId,
+    String? token,
+  }) async {
+    final effectiveBiz = businessId ?? activeBusinessId;
+    if (effectiveBiz == null) {
+      return {'success': false, 'error': {'code': 'NO_ACTIVE_BUSINESS', 'message': 'No active business selected'}};
+    }
+    final headers = _buildHeaders(token, {'X-Business-Id': effectiveBiz});
+
+    try {
+      final response = await _httpClient
+          .post(
+            _uri('/api/businesses/$effectiveBiz/invitations'),
+            headers: headers,
+            body: jsonEncode({
+              'email': email.trim().toLowerCase(),
+              'role': role.trim().toLowerCase(),
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 201 || response.statusCode == 200,
+        'statusCode': response.statusCode,
+        if (data is Map<String, dynamic>) ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {'code': 'NETWORK_ERROR', 'message': e.toString()},
+      };
+    }
+  }
+
+  /// Lists pending invitations for the business.
+  Future<List<BusinessInvitation>> getBusinessInvitations({
+    String? businessId,
+    String? token,
+  }) async {
+    final effectiveBiz = businessId ?? activeBusinessId;
+    if (effectiveBiz == null) return [];
+    final headers = _buildHeaders(token, {'X-Business-Id': effectiveBiz});
+
+    try {
+      final response = await _httpClient
+          .get(_uri('/api/businesses/$effectiveBiz/invitations'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data is Map && data['invitations'] is List) {
+          return (data['invitations'] as List)
+              .map((inv) => BusinessInvitation.fromJson(Map<String, dynamic>.from(inv)))
+              .toList();
+        }
+      }
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Revokes a pending invitation.
+  Future<bool> revokeBusinessInvitation({
+    required String invitationId,
+    String? businessId,
+    String? token,
+  }) async {
+    final effectiveBiz = businessId ?? activeBusinessId;
+    if (effectiveBiz == null) return false;
+    final headers = _buildHeaders(token, {'X-Business-Id': effectiveBiz});
+
+    try {
+      final response = await _httpClient
+          .delete(_uri('/api/businesses/$effectiveBiz/invitations/$invitationId'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Changes a member's role (admin or staff).
+  Future<Map<String, dynamic>> updateMemberRole({
+    required String userId,
+    required String role,
+    String? businessId,
+    String? token,
+  }) async {
+    final effectiveBiz = businessId ?? activeBusinessId;
+    if (effectiveBiz == null) {
+      return {'success': false, 'error': {'code': 'NO_ACTIVE_BUSINESS', 'message': 'No active business selected'}};
+    }
+    final headers = _buildHeaders(token, {'X-Business-Id': effectiveBiz});
+
+    try {
+      final response = await _httpClient
+          .patch(
+            _uri('/api/businesses/$effectiveBiz/members/$userId'),
+            headers: headers,
+            body: jsonEncode({'role': role}),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200,
+        'statusCode': response.statusCode,
+        if (data is Map<String, dynamic>) ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {'code': 'NETWORK_ERROR', 'message': e.toString()},
+      };
+    }
+  }
+
+  /// Removes a member from the business.
+  Future<Map<String, dynamic>> removeBusinessMember({
+    required String userId,
+    String? businessId,
+    String? token,
+  }) async {
+    final effectiveBiz = businessId ?? activeBusinessId;
+    if (effectiveBiz == null) {
+      return {'success': false, 'error': {'code': 'NO_ACTIVE_BUSINESS', 'message': 'No active business selected'}};
+    }
+    final headers = _buildHeaders(token, {'X-Business-Id': effectiveBiz});
+
+    try {
+      final response = await _httpClient
+          .delete(_uri('/api/businesses/$effectiveBiz/members/$userId'), headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200,
+        'statusCode': response.statusCode,
+        if (data is Map<String, dynamic>) ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {'code': 'NETWORK_ERROR', 'message': e.toString()},
+      };
+    }
+  }
+
+  /// Accepts an invitation using a secure token.
+  Future<Map<String, dynamic>> acceptBusinessInvitation({
+    required String invitationToken,
+    String? token,
+  }) async {
+    final headers = _buildHeaders(token);
+
+    try {
+      final response = await _httpClient
+          .post(
+            _uri('/api/businesses/invitations/accept'),
+            headers: headers,
+            body: jsonEncode({'token': invitationToken.trim()}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200,
+        'statusCode': response.statusCode,
+        if (data is Map<String, dynamic>) ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {'code': 'NETWORK_ERROR', 'message': e.toString()},
+      };
+    }
+  }
+
+  /// Updates business profile details (displayName, phone, email, timezone, logoUrl).
+  Future<Map<String, dynamic>> updateBusinessProfile({
+    required String businessId,
+    String? displayName,
+    String? phone,
+    String? email,
+    String? timezone,
+    String? logoUrl,
+    String? token,
+  }) async {
+    final headers = _buildHeaders(token, {'X-Business-Id': businessId});
+
+    try {
+      final response = await _httpClient
+          .put(
+            _uri('/api/businesses/$businessId'),
+            headers: headers,
+            body: jsonEncode({
+              if (displayName != null) 'displayName': displayName.trim(),
+              if (phone != null) 'phone': phone.trim(),
+              if (email != null) 'email': email.trim(),
+              if (timezone != null) 'timezone': timezone.trim(),
+              if (logoUrl != null) 'logoUrl': logoUrl.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200,
+        'statusCode': response.statusCode,
+        if (data is Map<String, dynamic>) ...data,
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'error': {'code': 'NETWORK_ERROR', 'message': e.toString()},
+      };
+    }
+  }
 }
+

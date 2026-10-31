@@ -9,6 +9,8 @@ import '../../../services/glowblast_backend_client.dart';
 import '../../auth/screens/landing_screen.dart';
 import 'opt_out_screen.dart';
 import 'recharge_meta_balance_screen.dart';
+import 'whatsapp_connection_screen.dart';
+import 'team_management_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final AppRepository repository;
@@ -219,6 +221,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 phone: cleanPhone,
               );
               await widget.repository.updateSettings(updated);
+
+              // Also sync with backend business profile if active business exists
+              if (widget.repository.hasActiveBusiness) {
+                await widget.repository.updateBusinessProfile(
+                  displayName: businessNameCtrl.text.trim(),
+                  phone: cleanPhone,
+                );
+              }
+
               if (!context.mounted) return;
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
@@ -287,9 +298,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: widget.repository,
-      builder: (context, _) {
+      builder: (listenCtx, _) {
         final settings = widget.repository.settings;
-        final isDark = Theme.of(context).brightness == Brightness.dark;
+        final isDark = Theme.of(listenCtx).brightness == Brightness.dark;
 
         final displayName = settings.fullName.isNotEmpty ? settings.fullName : 'Business Owner';
         final displayBusiness = settings.businessName.isNotEmpty ? settings.businessName : 'Spa & Wellness';
@@ -306,6 +317,64 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: ListView(
                     padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                     children: [
+                      // Section 0: Business Switcher (if user belongs to businesses)
+                      if (widget.repository.userBusinesses.isNotEmpty) ...[
+                        AppCard(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                          child: Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: AppColors.primarySageContainer,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: const Icon(Icons.swap_horiz_rounded, color: AppColors.primarySageDark, size: 20),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('Active Business Workspace', style: TextStyle(fontSize: 11, color: AppColors.textMuted, fontWeight: FontWeight.w600)),
+                                    DropdownButtonHideUnderline(
+                                      child: DropdownButton<String>(
+                                        isExpanded: true,
+                                        value: widget.repository.activeBusinessId,
+                                        items: widget.repository.userBusinesses.map((b) {
+                                          return DropdownMenuItem<String>(
+                                            value: b.businessId,
+                                            child: Text(
+                                              '${b.displayName} (${b.role.toUpperCase()})',
+                                              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          );
+                                        }).toList(),
+                                        onChanged: (newId) async {
+                                          if (newId != null && newId != widget.repository.activeBusinessId) {
+                                            final messenger = ScaffoldMessenger.of(context);
+                                            final target = widget.repository.userBusinesses.firstWhere((b) => b.businessId == newId);
+                                            await widget.repository.switchActiveBusiness(target);
+                                            messenger.showSnackBar(
+                                              SnackBar(
+                                                content: Text('Switched to ${target.displayName}'),
+                                                duration: const Duration(seconds: 2),
+                                              ),
+                                            );
+                                          }
+                                        },
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                      ],
+
                       // Section 1: Business Profile Card
                       AppCard(
                         padding: const EdgeInsets.all(18),
@@ -329,17 +398,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                     const Text('Business Profile', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
                                   ],
                                 ),
-                                TextButton.icon(
-                                  onPressed: _editBusinessProfile,
-                                  icon: const Icon(Icons.edit_outlined, size: 16),
-                                  label: const Text('Edit Profile'),
-                                ),
+                                if (widget.repository.isBusinessStaff)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: isDark ? AppColors.surfaceDark : const Color(0xFFF1F5F9),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: const Text('Staff (Read-Only)', style: TextStyle(fontSize: 11, color: AppColors.textMuted, fontWeight: FontWeight.w600)),
+                                  )
+                                else
+                                  TextButton.icon(
+                                    onPressed: _editBusinessProfile,
+                                    icon: const Icon(Icons.edit_outlined, size: 16),
+                                    label: const Text('Edit Profile'),
+                                  ),
                               ],
                             ),
                             const Divider(height: 20),
                             _buildInfoRow('Full Name', displayName, isDark),
                             const SizedBox(height: 10),
-                            _buildInfoRow('Business Name', displayBusiness, isDark),
+                            _buildInfoRow(
+                              'Business Name',
+                              widget.repository.activeBusiness?.displayName ?? displayBusiness,
+                              isDark,
+                            ),
+                            if (widget.repository.activeBusiness != null) ...[
+                              const SizedBox(height: 10),
+                              _buildInfoRow(
+                                'Assigned Role',
+                                widget.repository.activeBusiness!.role.toUpperCase(),
+                                isDark,
+                              ),
+                            ],
                             const SizedBox(height: 10),
                             _buildInfoRow('Contact Phone', displayPhone, isDark),
                             if (widget.repository.currentUser?.email != null) ...[
@@ -388,7 +479,66 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       ),
 
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 14),
+
+                      // Section 1.5: Team Management Card
+                      if (widget.repository.hasActiveBusiness) ...[
+                        AppCard(
+                          padding: const EdgeInsets.all(16),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFEFF6FF),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: const Icon(Icons.people_alt_rounded, color: Color(0xFF2563EB), size: 20),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      const Text('Team & Members', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14.5)),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        widget.repository.isBusinessStaff
+                                            ? 'View team roster'
+                                            : 'Invite members & manage permissions',
+                                        style: const TextStyle(fontSize: 11.5, color: AppColors.textMuted),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                              ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF2563EB),
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                ),
+                                icon: const Icon(Icons.arrow_forward_rounded, size: 14),
+                                label: Text(
+                                  widget.repository.isBusinessStaff ? 'View Team' : 'Manage Team',
+                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                                ),
+                                onPressed: () {
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                      builder: (context) => TeamManagementScreen(repository: widget.repository),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                      ],
 
                       // Section 2: Messaging Mode & WhatsApp Configuration
                       AppCard(
@@ -552,6 +702,78 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
 
                             const Divider(height: 24),
+
+                            // Business WABA Account Connection Row
+                            Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: isDark ? AppColors.surfaceDark : const Color(0xFFF0FDF4),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: const Color(0xFFBBF7D0)),
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            const Icon(Icons.hub_outlined, size: 16, color: AppColors.whatsApp),
+                                            const SizedBox(width: 6),
+                                            Text(
+                                              widget.repository.activeBusiness != null
+                                                  ? '${widget.repository.activeBusiness!.displayName} WABA'
+                                                  : 'WhatsApp Business Account',
+                                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 3),
+                                        const Text(
+                                          'Dedicated Meta phone number & credentials',
+                                          style: TextStyle(fontSize: 11.5, color: AppColors.textMuted),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  if (widget.repository.isBusinessStaff)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: isDark ? AppColors.surfaceDark : const Color(0xFFF1F5F9),
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: const Color(0xFFCBD5E1)),
+                                      ),
+                                      child: const Text(
+                                        'Admin Managed',
+                                        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.textMuted),
+                                      ),
+                                    )
+                                  else
+                                    ElevatedButton.icon(
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: AppColors.whatsApp,
+                                        foregroundColor: Colors.white,
+                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                      ),
+                                      icon: const Icon(Icons.settings_rounded, size: 14),
+                                      label: const Text('Manage WABA', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                                      onPressed: () {
+                                        Navigator.of(context).push(
+                                          MaterialPageRoute(
+                                            builder: (context) => WhatsAppConnectionScreen(repository: widget.repository),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                ],
+                              ),
+                            ),
+
+                            const SizedBox(height: 12),
 
                             // Meta messaging balance & recharge row
                             Container(

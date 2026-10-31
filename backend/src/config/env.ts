@@ -12,11 +12,14 @@ const candidateDirs = [
   path.resolve(__dirname, '../..'),
 ];
 
-for (const dir of candidateDirs) {
-  const envLocalPath = path.join(dir, '.env.local');
-  if (fs.existsSync(envLocalPath)) {
-    dotenv.config({ path: envLocalPath });
-    break;
+// In test environments, never load developer local database overrides from .env.local
+if (process.env.NODE_ENV !== 'test') {
+  for (const dir of candidateDirs) {
+    const envLocalPath = path.join(dir, '.env.local');
+    if (fs.existsSync(envLocalPath)) {
+      dotenv.config({ path: envLocalPath });
+      break;
+    }
   }
 }
 
@@ -38,7 +41,9 @@ const envSchema = z.object({
   WHATSAPP_BUSINESS_ACCOUNT_ID: z.string().default('1633948435034571'),
   TEST_WHATSAPP_DISPLAY_NUMBER: z.string().default('+1 (555) 632-5494'),
   WHATSAPP_ACCESS_TOKEN: z.string().default(''),
-  META_VERIFY_TOKEN: z.string().default('glowblast_webhook_verify_token'),
+  META_VERIFY_TOKEN: z
+    .string()
+    .default(() => (process.env.NODE_ENV === 'production' ? '' : 'glowblast_webhook_verify_token')),
   WHATSAPP_WEBHOOK_VERIFY_TOKEN: z.string().optional(),
   CORS_ALLOWED_ORIGINS: z.string().default('*'),
   BACKEND_BASE_URL: z.string().default('http://localhost:3000'),
@@ -59,10 +64,41 @@ const envSchema = z.object({
   BREVO_SENDER_NAME: z.string().default('GlowBlast'),
   JWT_SECRET: z.string().default('glowblast_jwt_super_secret_dev_2026'),
   OTP_HMAC_SECRET: z.string().default('glowblast_otp_hmac_secret_dev_2026'),
+  // AES-256-GCM encryption key for multi-business WABA tokens (32 bytes = 64 hex chars or 44 base64 chars)
+  // Canonical: WABA_TOKEN_ENCRYPTION_KEY, with seamless fallback alias: WABA_ENCRYPTION_KEY
+  WABA_TOKEN_ENCRYPTION_KEY: z.string().optional(),
+  WABA_ENCRYPTION_KEY: z.string().optional(),
+  META_APP_SECRET: z.string().optional(),
+  // Migration-only owner configuration (never used for ongoing authorization)
+  INITIAL_BUSINESS_OWNER_EMAIL: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() !== '' ? val.trim() : undefined))
+    .pipe(z.string().email().optional()),
   // Neon PostgreSQL Database Configuration
   DATABASE_URL: z.string().optional(),
   TEST_DATABASE_URL: z.string().optional(),
+}).superRefine((data, ctx) => {
+  if (data.NODE_ENV === 'production') {
+    if (!data.META_APP_SECRET || data.META_APP_SECRET.trim() === '') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'META_APP_SECRET is required in production environment',
+        path: ['META_APP_SECRET'],
+      });
+    }
+    const verifyToken = data.META_VERIFY_TOKEN || data.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+    if (!verifyToken || verifyToken.trim() === '' || verifyToken === 'glowblast_webhook_verify_token') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'META_VERIFY_TOKEN is required in production and cannot use default or empty value',
+        path: ['META_VERIFY_TOKEN'],
+      });
+    }
+  }
 });
+
+export { envSchema };
 
 const parsed = envSchema.safeParse(process.env);
 
@@ -93,6 +129,7 @@ export function getSafeConfigStatus() {
     displayNumber: env.TEST_WHATSAPP_DISPLAY_NUMBER,
     apiVersion: env.WHATSAPP_API_VERSION,
     brevoConfigured: !!(env.BREVO_API_KEY && env.BREVO_SENDER_EMAIL),
+    wabaEncryptionConfigured: !!(env.WABA_TOKEN_ENCRYPTION_KEY || env.WABA_ENCRYPTION_KEY),
     database: getSafeDatabaseStatus(),
     modes: {
       demo: {
@@ -204,13 +241,29 @@ export function getAuthorizedTestRecipients(): string[] {
 /**
  * Resolves the webhook verification token, accepting either WHATSAPP_WEBHOOK_VERIFY_TOKEN
  * or META_VERIFY_TOKEN for consistent environment configuration.
+ * In production, strictly requires a securely configured token and eliminates predictable hardcoded fallbacks.
  */
 export function getWebhookVerifyToken(): string {
-  return (
+  const candidate =
     process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ||
-    env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ||
-    env.META_VERIFY_TOKEN ||
-    'glowblast_webhook_verify_token'
-  );
+    process.env.META_VERIFY_TOKEN ||
+    (typeof env !== 'undefined' ? (env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || env.META_VERIFY_TOKEN) : undefined);
+
+  const isProd = (process.env.NODE_ENV || (typeof env !== 'undefined' ? env.NODE_ENV : undefined)) === 'production';
+
+  if (candidate && candidate.trim() !== '') {
+    if (isProd && candidate.trim() === 'glowblast_webhook_verify_token') {
+      throw new Error(
+        'Default webhook verify token is forbidden in production. Configure META_VERIFY_TOKEN in Render and Meta Developer Dashboard.'
+      );
+    }
+    return candidate.trim();
+  }
+
+  if (isProd) {
+    throw new Error('META_VERIFY_TOKEN is required in production environment.');
+  }
+
+  return 'glowblast_webhook_verify_token';
 }
 

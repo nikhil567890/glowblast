@@ -296,7 +296,7 @@ describe('Single-Business Production WhatsApp Cloud API Controls', () => {
               field: 'messages',
               value: {
                 messaging_product: 'whatsapp',
-                metadata: { display_phone_number: '12345', phone_number_id: '9999' },
+                metadata: { display_phone_number: '12345', phone_number_id: env.PROD_WHATSAPP_PHONE_NUMBER_ID },
                 messages: [
                   {
                     from: '919876543210',

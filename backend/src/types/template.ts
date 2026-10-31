@@ -30,6 +30,7 @@ export interface WhatsAppTemplate {
   exampleValues?: Record<string, string>;
   wabaId?: string; // Originating WABA ID
   mode?: 'test' | 'production'; // Target environment mode
+  businessId?: string;
   createdAt: string;
   updatedAt: string;
   lastSyncedAt?: string;
@@ -45,4 +46,5 @@ export interface CreateTemplateInput {
   variables?: string[];
   exampleValues?: Record<string, string>;
   submitToMeta?: boolean;
+  businessId?: string;
 }

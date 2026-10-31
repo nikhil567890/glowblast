@@ -28,6 +28,7 @@ export interface CampaignSendRequest {
       [key: string]: any;
     }>;
   }> | null;
+  businessId?: string | null;
   recipients: Array<{
     localCustomerId?: string | null;
     name?: string | null;
@@ -41,6 +42,7 @@ export interface CampaignSendRequest {
 
 export interface CampaignSummary {
   campaignId: string;
+  businessId?: string;
   clientRequestToken?: string;
   campaignName: string;
   status: CampaignStatus;

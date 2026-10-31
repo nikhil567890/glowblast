@@ -1,11 +1,14 @@
 import { Router, Request, Response } from 'express';
-import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import { env, isEmailAuthorizedForProduction } from '../config/env';
+import { isEmailAuthorizedForProduction } from '../config/env';
 import { consentStore, ConsentStatus, ConsentCategory } from '../store/consentStore';
-import { userStore } from '../store/userStore';
+import { requireAuth, requireBusinessMembership } from '../middleware/authMiddleware';
 
 const router = Router();
+
+// Mount authentication and business context middleware
+router.use(requireAuth);
+router.use(requireBusinessMembership());
 
 const recordConsentSchema = z.object({
   phone: z.string().min(10, 'Valid phone number is required'),
@@ -23,67 +26,33 @@ const batchCheckSchema = z.object({
   category: z.enum(['marketing', 'utility', 'unclassified']).default('marketing'),
 });
 
-/**
- * Authentication and authorization middleware helper for consent registry operations.
- * Only verified server-side identities may view or record consent.
- */
-async function authenticateAndAuthorize(req: Request, res: Response): Promise<{ userId: string; userEmail?: string } | null> {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({
-      success: false,
-      error: {
-        code: 'UNAUTHORIZED',
-        message: 'Authentication required to manage consent registry',
-      },
-    });
-    return null;
-  }
-
-  const token = authHeader.substring(7).trim();
-  try {
-    const decoded = jwt.verify(token, env.JWT_SECRET) as { sub?: string; email?: string; id?: string };
-    const userId = decoded.sub || decoded.id || 'authenticated_user';
-    let userEmail: string | undefined = undefined;
-
-    const serverUser = decoded.sub ? await userStore.findById(decoded.sub) : undefined;
-    if (serverUser && serverUser.email) {
-      userEmail = serverUser.email.trim().toLowerCase();
-    } else if (decoded.email && typeof decoded.email === 'string') {
-      userEmail = decoded.email.trim().toLowerCase();
-    } else if (decoded.sub && decoded.sub.includes('@')) {
-      userEmail = decoded.sub.trim().toLowerCase();
-    }
-
-    return { userId, userEmail };
-  } catch {
-    res.status(401).json({
-      success: false,
-      error: {
-        code: 'UNAUTHORIZED',
-        message: 'Invalid or expired authentication token',
-      },
-    });
-    return null;
-  }
-}
+const bulkRecordSchema = z.object({
+  records: z.array(
+    z.object({
+      phone: z.string().min(10, 'Valid phone number is required'),
+      customerId: z.string().optional(),
+      source: z.string().min(3, 'Consent source is required'),
+      evidence: z.string().min(3, 'Auditable evidence reference is required'),
+      consentTextVersion: z.string().optional(),
+    })
+  ).min(1).max(500, 'Bulk consent limited to 500 records per request'),
+  allowOptOutOverride: z.boolean().default(false),
+});
 
 /**
  * POST /api/consent/record
- * Authoritative recording of customer WhatsApp consent or opt-out.
+ * Authoritative recording of customer WhatsApp consent or opt-out scoped to active business.
  */
 router.post('/record', async (req: Request, res: Response) => {
-  const auth = await authenticateAndAuthorize(req, res);
-  if (!auth) return;
-
-  // Only authorized administrators can record or update customer WhatsApp consent
-  const isAuthorizedAdmin = !!(auth.userEmail && isEmailAuthorizedForProduction(auth.userEmail));
+  const userEmail = req.user?.email?.toLowerCase().trim();
+  const isAuthorizedAdmin = req.membership?.role === 'owner' || req.membership?.role === 'admin' || !!(userEmail && isEmailAuthorizedForProduction(userEmail));
+  
   if (!isAuthorizedAdmin) {
     res.status(403).json({
       success: false,
       error: {
         code: 'FORBIDDEN',
-        message: 'Only authorized administrators (PRODUCTION_ALLOWED_EMAILS) may record or modify customer WhatsApp consent.',
+        message: 'Only business owners, administrators, or authorized production emails may record or modify customer WhatsApp consent.',
       },
     });
     return;
@@ -103,14 +72,14 @@ router.post('/record', async (req: Request, res: Response) => {
   }
 
   const { phone, customerId, consentCategory, status, source, evidence, consentTextVersion, allowOptOutOverride } = parsed.data;
-  const updatedBy = auth.userEmail || auth.userId;
+  const updatedBy = userEmail || req.user?.id || 'authenticated_user';
 
   if (status === 'opted_in' && consentCategory === 'unclassified') {
     res.status(400).json({
       success: false,
       error: {
         code: 'INVALID_CONSENT_CATEGORY',
-        message: "Explicit marketing or utility category is required for opt-in. Unclassified is reserved for historical unverified records.",
+        message: 'Explicit marketing or utility category is required for opt-in. Unclassified is reserved for historical unverified records.',
       },
     });
     return;
@@ -127,6 +96,7 @@ router.post('/record', async (req: Request, res: Response) => {
     updatedBy,
     isAuthorizedAdmin,
     allowOptOutOverride: allowOptOutOverride === true,
+    businessId: req.business!.id,
   });
 
   if (!record) {
@@ -148,34 +118,18 @@ router.post('/record', async (req: Request, res: Response) => {
 
 /**
  * POST /api/consent/bulk-record
- * Records verbal marketing opt-in for a batch of customers.
- * Each record is attempted independently; partial failures are reported.
- * Never assigns consent during import — this endpoint is for confirmed verbal consent only.
+ * Records verbal marketing opt-in for a batch of customers scoped to active business.
  */
-const bulkRecordSchema = z.object({
-  records: z.array(
-    z.object({
-      phone: z.string().min(10, 'Valid phone number is required'),
-      customerId: z.string().optional(),
-      source: z.string().min(3, 'Consent source is required'),
-      evidence: z.string().min(3, 'Auditable evidence reference is required'),
-      consentTextVersion: z.string().optional(),
-    })
-  ).min(1).max(500, 'Bulk consent limited to 500 records per request'),
-  allowOptOutOverride: z.boolean().default(false),
-});
-
 router.post('/bulk-record', async (req: Request, res: Response) => {
-  const auth = await authenticateAndAuthorize(req, res);
-  if (!auth) return;
-
-  const isAuthorizedAdmin = !!(auth.userEmail && isEmailAuthorizedForProduction(auth.userEmail));
+  const userEmail = req.user?.email?.toLowerCase().trim();
+  const isAuthorizedAdmin = req.membership?.role === 'owner' || req.membership?.role === 'admin' || !!(userEmail && isEmailAuthorizedForProduction(userEmail));
+  
   if (!isAuthorizedAdmin) {
     res.status(403).json({
       success: false,
       error: {
         code: 'FORBIDDEN',
-        message: 'Only authorized administrators (PRODUCTION_ALLOWED_EMAILS) may record bulk consent.',
+        message: 'Only business owners, administrators, or authorized production emails may record bulk consent.',
       },
     });
     return;
@@ -194,7 +148,7 @@ router.post('/bulk-record', async (req: Request, res: Response) => {
   }
 
   const { records, allowOptOutOverride } = parsed.data;
-  const updatedBy = auth.userEmail || auth.userId;
+  const updatedBy = userEmail || req.user?.id || 'authenticated_user';
 
   const outcome = await consentStore.bulkRecordConsent({
     records: records.map((entry) => ({
@@ -209,6 +163,7 @@ router.post('/bulk-record', async (req: Request, res: Response) => {
     updatedBy,
     isAuthorizedAdmin,
     allowOptOutOverride,
+    businessId: req.business!.id,
   });
 
   res.status(200).json({
@@ -221,18 +176,14 @@ router.post('/bulk-record', async (req: Request, res: Response) => {
   });
 });
 
-
 /**
  * GET /api/consent
- * Returns all consent records, optionally filtered by category query param.
+ * Returns all consent records for the authenticated business, optionally filtered by category.
  */
 router.get('/', async (req: Request, res: Response) => {
-  const auth = await authenticateAndAuthorize(req, res);
-  if (!auth) return;
-
   const categoryQuery = req.query.category as string | undefined;
   const validCategory = (categoryQuery === 'marketing' || categoryQuery === 'utility' || categoryQuery === 'unclassified') ? (categoryQuery as ConsentCategory) : undefined;
-  const records = await consentStore.getAll(validCategory);
+  const records = await consentStore.getAll(validCategory, req.business!.id);
 
   res.status(200).json({
     success: true,
@@ -243,12 +194,9 @@ router.get('/', async (req: Request, res: Response) => {
 
 /**
  * POST /api/consent/batch-check
- * Efficiently checks consent for an array of recipient phone numbers.
+ * Efficiently checks consent for an array of recipient phone numbers within the business.
  */
 router.post('/batch-check', async (req: Request, res: Response) => {
-  const auth = await authenticateAndAuthorize(req, res);
-  if (!auth) return;
-
   const parsed = batchCheckSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({
@@ -265,8 +213,8 @@ router.post('/batch-check', async (req: Request, res: Response) => {
   const results: Record<string, { hasConsent: boolean; status: string; category: string }> = {};
 
   for (const phone of phones) {
-    const hasConsent = await consentStore.hasActiveConsent(phone, category as ConsentCategory);
-    const record = await consentStore.getConsent(phone, category as ConsentCategory);
+    const hasConsent = await consentStore.hasActiveConsent(phone, category as ConsentCategory, req.business!.id);
+    const record = await consentStore.getConsent(phone, category as ConsentCategory, req.business!.id);
     results[phone] = {
       hasConsent,
       status: record?.status || 'unknown',
@@ -282,18 +230,14 @@ router.post('/batch-check', async (req: Request, res: Response) => {
 
 /**
  * GET /api/consent/:phone
- * Query server-side consent status for a recipient.
+ * Query server-side consent status for a recipient within the business.
  */
 router.get('/:phone', async (req: Request, res: Response) => {
-  const auth = await authenticateAndAuthorize(req, res);
-  if (!auth) return;
-
   const { phone } = req.params;
   const categoryQuery = req.query.category as string | undefined;
 
   if (categoryQuery === 'marketing' || categoryQuery === 'utility') {
-    const record = await consentStore.getConsent(phone, categoryQuery as ConsentCategory);
-    // Always return 200 so callers can reliably check hasConsent without catching 404
+    const record = await consentStore.getConsent(phone, categoryQuery as ConsentCategory, req.business!.id);
     res.status(200).json({
       success: true,
       hasConsent: record?.status === 'opted_in',
@@ -305,7 +249,7 @@ router.get('/:phone', async (req: Request, res: Response) => {
   }
 
   // If no category specified, return both marketing and utility records
-  const allRecords = await consentStore.getConsentsForPhone(phone);
+  const allRecords = await consentStore.getConsentsForPhone(phone, req.business!.id);
   const marketingRecord = allRecords.find((r) => r.consentCategory === 'marketing');
   const utilityRecord = allRecords.find((r) => r.consentCategory === 'utility');
 

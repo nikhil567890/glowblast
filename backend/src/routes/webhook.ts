@@ -34,6 +34,18 @@ router.get('/whatsapp', (req: Request, res: Response) => {
  * Receives delivery status receipts (sent, delivered, read, failed) from Meta.
  */
 router.post('/whatsapp', async (req: Request, res: Response) => {
+  const signatureHeader = req.headers['x-hub-signature-256'] as string | undefined;
+  const rawPayload = (req as any).rawBody ?? JSON.stringify(req.body);
+
+  if (!WebhookService.verifySignature(rawPayload, signatureHeader)) {
+    console.warn('[Webhook] Webhook signature verification failed. Rejecting incoming request.');
+    res.status(403).json({
+      success: false,
+      error: 'Invalid or missing webhook signature',
+    });
+    return;
+  }
+
   try {
     await WebhookService.processWebhookPayload(req.body);
     // Meta requires immediate 200 OK

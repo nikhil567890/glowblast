@@ -65,7 +65,7 @@ export class BusinessStore {
       if (res.rows.length === 0) return null;
       return this.mapBusinessRow(res.rows[0]);
     } catch (err: any) {
-      if (err.code === '42P01') return this.mockBusinesses.get(id) || null;
+      if (err.code === '42P01' || err.message?.includes('not configured')) return this.mockBusinesses.get(id) || null;
       throw err;
     }
   }
@@ -93,7 +93,7 @@ export class BusinessStore {
       if (res.rows.length === 0) return null;
       return this.mapBusinessRow(res.rows[0]);
     } catch (err: any) {
-      if (err.code === '42P01') return this.mockBusinesses.get(normalizedSlug) || null;
+      if (err.code === '42P01' || err.message?.includes('not configured')) return this.mockBusinesses.get(normalizedSlug) || null;
       throw err;
     }
   }

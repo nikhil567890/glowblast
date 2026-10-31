@@ -18,6 +18,7 @@ declare global {
       user?: AuthenticatedUser;
       business?: Business;
       membership?: BusinessMember;
+      rawBody?: Buffer;
     }
   }
 }
@@ -124,9 +125,19 @@ export function requireBusinessMembership(minRole?: BusinessRole) {
 
       // Verify membership in database (FAIL-CLOSED: never trust client header alone)
       const membership = await businessStore.getMember(targetBusinessId, req.user.id);
-      const business = await businessStore.findById(targetBusinessId);
+      if (!membership) {
+        res.status(403).json({
+          success: false,
+          error: {
+            code: 'UNAUTHORIZED_BUSINESS_ACCESS',
+            message: 'You are not an authorized member of this business or the business is inactive.',
+          },
+        });
+        return;
+      }
 
-      if (!membership || !business || !business.isActive) {
+      const business = await businessStore.findById(targetBusinessId);
+      if (!business || !business.isActive) {
         res.status(403).json({
           success: false,
           error: {

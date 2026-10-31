@@ -14,10 +14,23 @@ export class WebhookService {
   /**
    * Validates Meta X-Hub-Signature-256 HMAC-SHA256 signature against META_APP_SECRET.
    * Uses timingSafeEqual to protect against timing attacks.
+   *
+   * Production Security Guarantees:
+   * 1. In production, strictly requires a configured META_APP_SECRET and fails closed if missing.
+   * 2. In development / test, permits payloads without signature ONLY if META_APP_SECRET is explicitly unset.
+   *    If META_APP_SECRET is set in dev/test, signature verification is strictly enforced.
+   * 3. Never logs secrets, webhook tokens, or signature hashes.
    */
   public static verifySignature(rawPayload: string | Buffer, signatureHeader?: string): boolean {
-    if (!env.META_APP_SECRET) {
-      // If not configured (e.g. development sandbox or test suites without app secret), permit
+    const isProd = (process.env.NODE_ENV || env.NODE_ENV) === 'production';
+    const appSecret = process.env.META_APP_SECRET || env.META_APP_SECRET;
+
+    if (!appSecret || appSecret.trim() === '') {
+      if (isProd) {
+        console.error('[Webhook] Production security failure: META_APP_SECRET is missing. Rejecting webhook payload.');
+        return false;
+      }
+      // Explicit non-production sandbox without configured app secret
       return true;
     }
 
@@ -26,15 +39,19 @@ export class WebhookService {
     }
 
     const providedSignature = signatureHeader.substring(7).trim();
-    const hmac = crypto.createHmac('sha256', env.META_APP_SECRET);
-    hmac.update(rawPayload);
-    const expectedSignature = hmac.digest('hex');
-
-    if (providedSignature.length !== expectedSignature.length) {
+    if (!providedSignature) {
       return false;
     }
 
     try {
+      const hmac = crypto.createHmac('sha256', appSecret.trim());
+      hmac.update(rawPayload);
+      const expectedSignature = hmac.digest('hex');
+
+      if (providedSignature.length !== expectedSignature.length) {
+        return false;
+      }
+
       return crypto.timingSafeEqual(
         Buffer.from(providedSignature, 'hex'),
         Buffer.from(expectedSignature, 'hex')

@@ -52,12 +52,12 @@ BEGIN
       SELECT id, name, email, COALESCE(NULLIF(business_name, ''), 'GlowBlast Spa & Wellness'), phone
       INTO v_owner_id, v_owner_name, v_owner_email, v_biz_name, v_owner_phone
       FROM users
-      WHERE LOWER(email) = LOWER(v_target_email);
+      WHERE LOWER(email) = LOWER(v_target_email) AND email_verified = true;
 
       IF v_owner_id IS NULL THEN
-        RAISE EXCEPTION '[Backfill] Specified glowblast.initial_owner_email (%) does not match any user in users table.', v_target_email;
+        RAISE EXCEPTION '[Backfill] Specified glowblast.initial_owner_email does not match any verified user in users table.';
       END IF;
-      RAISE NOTICE '[Backfill] Using explicitly specified initial business owner: % (%)', v_owner_name, v_owner_email;
+      RAISE NOTICE '[Backfill] Using explicitly specified initial business owner.';
 
     ELSIF v_verified_users = 1 THEN
       -- Exactly one verified user exists — unambiguous sole owner
@@ -66,7 +66,7 @@ BEGIN
       FROM users
       WHERE email_verified = true;
 
-      RAISE NOTICE '[Backfill] Unambiguous verified single owner identified: % (%)', v_owner_name, v_owner_email;
+      RAISE NOTICE '[Backfill] Unambiguous verified single owner identified.';
 
     ELSIF v_verified_users = 0 AND v_total_users = 1 THEN
       -- Exactly one user exists in total (even if not yet marked email_verified)
@@ -74,7 +74,7 @@ BEGIN
       INTO v_owner_id, v_owner_name, v_owner_email, v_biz_name, v_owner_phone
       FROM users;
 
-      RAISE NOTICE '[Backfill] Single registered user identified as initial owner: % (%)', v_owner_name, v_owner_email;
+      RAISE NOTICE '[Backfill] Single registered user identified as initial owner.';
 
     ELSE
       -- Multiple verified users exist without explicit owner designation.
